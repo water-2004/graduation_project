@@ -1,0 +1,71 @@
+﻿# 操作系统 / 编辑器
+.vscode/
+.vs/
+.idea/
+*.user
+*.suo
+*.swp
+
+# Git / Python / 通用缓存
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.tmp
+*.log
+
+# 数据集与原始材料
+MIT-BIH/
+processed/
+results/
+artifacts/
+doc/
+
+# 第三方大体积依赖
+third_party/
+
+# 构建目录与生成文件
+build/
+cpp/build/
+widget/**/build/
+cmake-build-*/
+CMakeUserPresets.json
+compile_commands.json
+
+# C++ / MSVC / MinGW 产物
+*.obj
+*.o
+*.a
+*.lib
+*.dll
+*.exe
+*.exp
+*.ilk
+*.pdb
+*.idb
+*.manifest
+*.res
+
+# Qt 生成文件
+*.autosave
+*.qmake.stash
+*.pro.user*
+*.qbs.user*
+CMakeLists.txt.user*
+moc_*.cpp
+ui_*.h
+qrc_*.cpp
+
+# 模型与训练权重
+*.onnx
+*.pt
+*.pth
+*.ckpt
+
+# 日志目录
+logs/
+
+# 个人临时文档
+docs/interview_mock_qa.md
+docs/*面试*
+
