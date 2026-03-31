@@ -344,13 +344,6 @@ Orange Pi 3 为 2GB 内存，建议使用：
 - [docs/香橙派边缘端部署与联调测试说明.md](docs/香橙派边缘端部署与联调测试说明.md)
 - [docs/论文参考模型边缘部署说明.md](docs/论文参考模型边缘部署说明.md)
 
-## GitHub 版本控制建议
-
-当前仓库远程地址为：
-
-```text
-git@github.com:water-2004/graduation_project.git
-```
 
 为了避免仓库过大，以下内容默认不纳入 Git：
 
@@ -371,16 +364,6 @@ git@github.com:water-2004/graduation_project.git
 - 中文技术文档
 - 配置与协议设计
 
-## 推荐提交流程
-
-```powershell
-git status
-git add README.md .gitignore cpp widget scripts shared docs
-git commit -m "feat: update project docs and deployment workflow"
-git push origin main
-```
-
-如果你希望把当前所有源码改动一起上传，建议先用 `git status` 检查一遍，确认没有把运行时数据库、日志或个人临时文件一并带进去。
 
 ## 文档索引
 
@@ -407,4 +390,3 @@ git push origin main
 - 登录、病人管理、监测记录、报警中心、报警详情、密码修改
 - 网络超时与自动重连
 
-从毕业设计推进角度看，当前已经不是“毛坯框架”，而是进入“系统联调、完善展示和打磨答辩材料”的阶段。
