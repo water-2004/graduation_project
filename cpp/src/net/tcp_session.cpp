@@ -4,8 +4,8 @@
 
 namespace edge::net {
 
-TcpSession::TcpSession(boost::asio::io_context& io_context, std::shared_ptr<logic::LogicSystem> logic_system)
-    : socket_(io_context), logic_system_(std::move(logic_system)) {}
+TcpSession::TcpSession(boost::asio::io_context& io_context, std::shared_ptr<LogicHandler> logic_handler)
+    : socket_(io_context), logic_handler_(std::move(logic_handler)) {}
 
 void TcpSession::Start() {
     DoRead();
@@ -13,12 +13,21 @@ void TcpSession::Start() {
 
 void TcpSession::DoRead() {
     auto self = shared_from_this();
-    // 按“行”读取协议消息（\n 分隔）。
-    boost::asio::async_read_until(socket_, read_buffer_, '\n', [self](const boost::system::error_code& ec, std::size_t) {
+    // 按”行”读取协议消息（\n 分隔）。
+    boost::asio::async_read_until(socket_, read_buffer_, '\n', [self](const boost::system::error_code& ec, std::size_t bytes_transferred) {
         if (ec) {
             if (ec != boost::asio::error::eof && ec != boost::asio::error::connection_reset) {
-                gp::logging::Logger::Instance().Error("会话读取失败: ", ec.message());
+                gp::logging::Logger::Instance().Error(“会话读取失败: “, ec.message());
             }
+            return;
+        }
+
+        // 防止恶意超长输入导致资源耗尽。
+        if (bytes_transferred > kMaxLineLength) {
+            gp::logging::Logger::Instance().Warning(
+                “输入行过长（”, bytes_transferred, “ 字节），断开连接”);
+            self->read_buffer_.consume(self->read_buffer_.size());
+            self->DoWrite(“ERR 输入过长”, true);
             return;
         }
 
@@ -27,7 +36,7 @@ void TcpSession::DoRead() {
         std::getline(stream, line);
 
         bool close_conn = false;
-        const std::string response = self->logic_system_->HandleLine(line, &close_conn);
+        const std::string response = self->logic_handler_->HandleLine(line, &close_conn);
         self->DoWrite(response, close_conn);
     });
 }

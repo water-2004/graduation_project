@@ -12,8 +12,8 @@ TcpServer::TcpServer(
     const std::string& host,
     std::uint16_t port,
     IOContextPool& io_pool,
-    std::shared_ptr<logic::LogicSystem> logic_system)
-    : acceptor_(io_context), io_pool_(io_pool), logic_system_(std::move(logic_system)) {
+    std::shared_ptr<LogicHandler> logic_handler)
+    : acceptor_(io_context), io_pool_(io_pool), logic_handler_(std::move(logic_handler)) {
     const auto address = boost::asio::ip::make_address(host);
     boost::asio::ip::tcp::endpoint endpoint(address, port);
 
@@ -46,7 +46,7 @@ void TcpServer::Start() {
 void TcpServer::DoAccept() {
     // 每个新会话从线程池中轮询分配一个 io_context。
     auto& session_io = io_pool_.GetIOContext();
-    auto session = std::make_shared<TcpSession>(session_io, logic_system_);
+    auto session = std::make_shared<TcpSession>(session_io, logic_handler_);
 
     auto self = shared_from_this();
     acceptor_.async_accept(session->socket(), [self, session](const boost::system::error_code& ec) {

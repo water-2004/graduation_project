@@ -43,13 +43,26 @@ if(BOOST_ROOT)
         set(BOOST_INCLUDE_DIR "${BOOST_ROOT}/include/boost-1_87")
     elseif(EXISTS "${BOOST_ROOT}/include/boost/asio.hpp")
         set(BOOST_INCLUDE_DIR "${BOOST_ROOT}/include")
+    elseif(EXISTS "${BOOST_ROOT}/include/x86_64-linux-gnu/boost/asio.hpp")
+        set(BOOST_INCLUDE_DIR "${BOOST_ROOT}/include/x86_64-linux-gnu")
+    elseif(EXISTS "${BOOST_ROOT}/include/aarch64-linux-gnu/boost/asio.hpp")
+        set(BOOST_INCLUDE_DIR "${BOOST_ROOT}/include/aarch64-linux-gnu")
     endif()
+endif()
+
+if(NOT BOOST_INCLUDE_DIR AND EXISTS "/usr/include/boost/asio.hpp")
+    set(BOOST_INCLUDE_DIR "/usr/include")
 endif()
 
 set(SHARED_LOGGER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../shared")
 set(SHARED_LOGGER_SOURCES
     "${SHARED_LOGGER_DIR}/logger.cpp"
 )
+
+set(SQLITE_THIRD_PARTY_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/sqlite")
+set(SQLITE_INCLUDE_DIR "${SQLITE_THIRD_PARTY_DIR}")
+set(SQLITE_LIB "${SQLITE_THIRD_PARTY_DIR}/sqlite3.lib")
+set(SQLITE_DLL "${SQLITE_THIRD_PARTY_DIR}/sqlite3.dll")
 
 add_executable(edge_infer
     src/edge_infer.cpp
@@ -83,6 +96,7 @@ if(BOOST_INCLUDE_DIR)
         src/net/tcp_session.cpp
         src/logic/logic_system.cpp
         src/service/inference_engine.cpp
+        src/service/sample_repository.cpp
         ${SHARED_LOGGER_SOURCES}
     )
 
@@ -97,15 +111,43 @@ if(BOOST_INCLUDE_DIR)
     target_link_libraries(edge_infer_service PRIVATE "${ONNXRUNTIME_LIB}")
     target_compile_definitions(edge_infer_service PRIVATE BOOST_ERROR_CODE_HEADER_ONLY)
 
+    add_executable(
+        business_service
+        src/business/business_service_main.cpp
+        src/business/business_logic.cpp
+        src/business/file_repository.cpp
+        src/business/sha256.cpp
+        src/net/io_context_pool.cpp
+        src/net/tcp_server.cpp
+        src/net/tcp_session.cpp
+        ${SHARED_LOGGER_SOURCES}
+    )
+
+    target_include_directories(
+        business_service
+        PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            "${BOOST_INCLUDE_DIR}"
+            "${SQLITE_INCLUDE_DIR}"
+            "${SHARED_LOGGER_DIR}"
+    )
+    target_link_libraries(business_service PRIVATE "${SQLITE_LIB}")
+    target_compile_definitions(business_service PRIVATE BOOST_ERROR_CODE_HEADER_ONLY)
+
     if(WIN32)
         target_link_libraries(edge_infer_service PRIVATE ws2_32 mswsock)
         target_compile_definitions(edge_infer_service PRIVATE _WIN32_WINNT=0x0A00)
+
+        target_link_libraries(business_service PRIVATE ws2_32 mswsock)
+        target_compile_definitions(business_service PRIVATE _WIN32_WINNT=0x0A00)
     endif()
 
     if(MSVC)
         target_compile_options(edge_infer_service PRIVATE /W4 /utf-8)
+        target_compile_options(business_service PRIVATE /W4 /utf-8)
     else()
         target_compile_options(edge_infer_service PRIVATE -Wall -Wextra -Wpedantic)
+        target_compile_options(business_service PRIVATE -Wall -Wextra -Wpedantic)
     endif()
 
     if(WIN32 AND DEFINED ONNXRUNTIME_DLL AND EXISTS "${ONNXRUNTIME_DLL}")
@@ -117,6 +159,77 @@ if(BOOST_INCLUDE_DIR)
                 "$<TARGET_FILE_DIR:edge_infer_service>/onnxruntime.dll"
         )
     endif()
+
+    if(WIN32 AND EXISTS "${SQLITE_DLL}")
+        add_custom_command(
+            TARGET business_service
+            POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${SQLITE_DLL}"
+                "$<TARGET_FILE_DIR:business_service>/sqlite3.dll"
+        )
+    endif()
 else()
     message(WARNING "Boost.Asio headers not found. edge_infer_service target will be skipped.")
+endif()
+
+# ---- Unit Tests (Google Test) ----
+option(BUILD_TESTS "Build unit tests" OFF)
+
+if(BUILD_TESTS)
+    include(FetchContent)
+    FetchContent_Declare(
+        googletest
+        GIT_REPOSITORY https://github.com/google/googletest.git
+        GIT_TAG        v1.14.0
+    )
+    set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(googletest)
+
+    enable_testing()
+
+    add_executable(test_sha256
+        tests/test_sha256.cpp
+        src/business/sha256.cpp
+    )
+    target_include_directories(test_sha256 PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_link_libraries(test_sha256 PRIVATE GTest::gtest_main)
+    if(MSVC)
+        target_compile_options(test_sha256 PRIVATE /W4 /utf-8)
+    else()
+        target_compile_options(test_sha256 PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME test_sha256 COMMAND test_sha256)
+
+    if(EXISTS "${SQLITE_LIB}")
+        add_executable(test_business_logic
+            tests/test_business_logic.cpp
+            src/business/business_logic.cpp
+            src/business/file_repository.cpp
+            src/business/sha256.cpp
+            ${SHARED_LOGGER_SOURCES}
+        )
+        target_include_directories(test_business_logic PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            "${SQLITE_INCLUDE_DIR}"
+            "${SHARED_LOGGER_DIR}"
+        )
+        target_link_libraries(test_business_logic PRIVATE GTest::gtest_main "${SQLITE_LIB}")
+        if(MSVC)
+            target_compile_options(test_business_logic PRIVATE /W4 /utf-8)
+        else()
+            target_compile_options(test_business_logic PRIVATE -Wall -Wextra -Wpedantic)
+        endif()
+        add_test(NAME test_business_logic COMMAND test_business_logic)
+
+        if(WIN32 AND EXISTS "${SQLITE_DLL}")
+            add_custom_command(
+                TARGET test_business_logic
+                POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${SQLITE_DLL}"
+                    "$<TARGET_FILE_DIR:test_business_logic>/sqlite3.dll"
+            )
+        endif()
+    endif()
 endif()

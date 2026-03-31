@@ -2,6 +2,7 @@
 .vscode/
 .vs/
 .idea/
+.claude/
 *.user
 *.suo
 *.swp
@@ -16,6 +17,7 @@ __pycache__/
 
 # 数据集与原始材料
 MIT-BIH/
+data/
 processed/
 results/
 artifacts/
@@ -61,6 +63,7 @@ qrc_*.cpp
 *.pt
 *.pth
 *.ckpt
+*.db
 
 # 日志目录
 logs/
@@ -68,4 +71,3 @@ logs/
 # 个人临时文档
 docs/interview_mock_qa.md
 docs/*面试*
-

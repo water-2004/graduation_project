@@ -19,13 +19,36 @@ set(PROJECT_SOURCES
         mainwindow.cpp
         mainwindow.h
         mainwindow.ui
+        login_page.cpp
+        login_page.h
+        dashboard_page.cpp
+        dashboard_page.h
+        patient_page.cpp
+        patient_page.h
+        alarm_center_page.cpp
+        alarm_center_page.h
+        alert_detail_dialog.cpp
+        alert_detail_dialog.h
+        about_page.cpp
+        about_page.h
+        sidebar_widget.cpp
+        sidebar_widget.h
+        pagination_widget.cpp
+        pagination_widget.h
+        csv_exporter.cpp
+        csv_exporter.h
+        business_client.cpp
+        business_client.h
         inferpage.cpp
         inferpage.h
         inferpage.ui
+        ecg_wave_widget.cpp
+        ecg_wave_widget.h
         tcpmgr.cpp
         tcpmgr.h
         global.h
         singleton.h
+        resources.qrc
         ${SHARED_LOGGER_DIR}/logger.cpp
         ${SHARED_LOGGER_DIR}/logger.h
 )

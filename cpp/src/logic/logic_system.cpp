@@ -9,8 +9,10 @@
 
 namespace edge::logic {
 
-LogicSystem::LogicSystem(std::shared_ptr<service::InferenceEngine> engine)
-    : engine_(std::move(engine)) {
+LogicSystem::LogicSystem(
+    std::shared_ptr<service::InferenceEngine> engine,
+    std::shared_ptr<service::SampleRepository> sample_repository)
+    : engine_(std::move(engine)), sample_repository_(std::move(sample_repository)) {
     Register("PING", [](const std::string&, bool*) {
         return std::string("PONG");
     });
@@ -49,6 +51,68 @@ LogicSystem::LogicSystem(std::shared_ptr<service::InferenceEngine> engine)
             return std::string("ERR 推理失败: ") + e.what();
         }
     });
+
+    Register("LIST_SAMPLES", [this](const std::string&, bool*) {
+        if (!sample_repository_) {
+            return std::string("ERR 当前服务未配置样本目录");
+        }
+
+        const auto& names = sample_repository_->ListNames();
+        std::ostringstream response;
+        response << "SAMPLES";
+        if (!names.empty()) {
+            response << ' ';
+            for (std::size_t i = 0; i < names.size(); ++i) {
+                if (i > 0) {
+                    response << ',';
+                }
+                response << names[i];
+            }
+        }
+
+        gp::logging::Logger::Instance().Info("返回样本列表，数量: ", names.size());
+        return response.str();
+    });
+
+    Register("PLAY_SAMPLE", [this](const std::string& payload, bool*) {
+        if (!sample_repository_) {
+            return std::string("ERR 当前服务未配置样本目录");
+        }
+
+        const std::string sample_name = Trim(payload);
+        if (sample_name.empty()) {
+            return std::string("ERR 样本名不能为空");
+        }
+
+        const service::BeatSample* sample = sample_repository_->FindByName(sample_name);
+        if (sample == nullptr) {
+            return std::string("ERR 样本不存在: ") + sample_name;
+        }
+
+        try {
+            const service::PredictResult result = engine_->Predict(sample->values);
+            std::ostringstream response;
+            response << "BEAT name=" << sample->name
+                     << " true=" << sample->true_label
+                     << " pred=" << result.pred_label
+                     << " conf=" << std::fixed << std::setprecision(6) << result.confidence
+                     << " alert=" << result.alert_level
+                     << " latency_ms=" << std::fixed << std::setprecision(3) << result.latency_ms
+                     << " values=" << SerializeFeatureCsv(sample->values);
+
+            gp::logging::Logger::Instance().Info(
+                "播放样本完成 name=", sample->name,
+                " true=", sample->true_label,
+                " pred=", result.pred_label,
+                " conf=", std::fixed, std::setprecision(6), result.confidence,
+                " alert=", result.alert_level,
+                " latency_ms=", std::fixed, std::setprecision(3), result.latency_ms);
+            return response.str();
+        } catch (const std::exception& e) {
+            gp::logging::Logger::Instance().Error("播放样本推理失败: ", e.what());
+            return std::string("ERR 播放样本失败: ") + e.what();
+        }
+    });
 }
 
 std::string LogicSystem::HandleLine(const std::string& line, bool* close_conn) const {
@@ -80,7 +144,7 @@ std::string LogicSystem::HandleLine(const std::string& line, bool* close_conn) c
     const auto it = handlers_.find(cmd);
     if (it == handlers_.end()) {
         gp::logging::Logger::Instance().Warning("未知命令: ", cmd);
-        return "ERR 未知命令，支持: PING | PREDICT ... | QUIT";
+        return "ERR 未知命令，支持: PING | PREDICT ... | LIST_SAMPLES | PLAY_SAMPLE <name> | QUIT";
     }
 
     return it->second(payload, close_conn);
@@ -91,6 +155,31 @@ std::string LogicSystem::ToUpper(std::string text) {
         return static_cast<char>(std::toupper(c));
     });
     return text;
+}
+
+std::string LogicSystem::Trim(const std::string& text) {
+    std::size_t begin = 0;
+    while (begin < text.size() && std::isspace(static_cast<unsigned char>(text[begin])) != 0) {
+        ++begin;
+    }
+
+    std::size_t end = text.size();
+    while (end > begin && std::isspace(static_cast<unsigned char>(text[end - 1])) != 0) {
+        --end;
+    }
+    return text.substr(begin, end - begin);
+}
+
+std::string LogicSystem::SerializeFeatureCsv(const std::vector<float>& features) {
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(6);
+    for (std::size_t i = 0; i < features.size(); ++i) {
+        if (i > 0) {
+            oss << ',';
+        }
+        oss << features[i];
+    }
+    return oss.str();
 }
 
 bool LogicSystem::ParseFeatureCsv(

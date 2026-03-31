@@ -61,9 +61,8 @@ void IOContextPool::Stop() {
 }
 
 boost::asio::io_context& IOContextPool::GetIOContext() {
-    auto& io = *io_contexts_[next_index_];
-    next_index_ = (next_index_ + 1) % io_contexts_.size();
-    return io;
+    const std::size_t index = next_index_.fetch_add(1, std::memory_order_relaxed) % io_contexts_.size();
+    return *io_contexts_[index];
 }
 
 }  // namespace edge::net

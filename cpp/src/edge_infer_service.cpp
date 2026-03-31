@@ -2,6 +2,7 @@
 #include "net/io_context_pool.h"
 #include "net/tcp_server.h"
 #include "service/inference_engine.h"
+#include "service/sample_repository.h"
 #include "logger.h"
 
 #include <boost/asio.hpp>
@@ -11,8 +12,10 @@
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -24,12 +27,13 @@
 namespace {
 
 struct Args {
-    std::string model_path = "artifacts/cnn_mitbih_v2/model_best.onnx";
+    std::string model_path = "artifacts/paper_reference_cnn_full_v1/model_best.onnx";
     std::string host = "0.0.0.0";
     std::uint16_t port = 9000;
     std::size_t feature_dim = 187;
     double critical_threshold = 0.90;
     std::size_t io_threads = 4;
+    std::string sample_dir;
     std::string log_dir;
 };
 
@@ -52,19 +56,39 @@ std::filesystem::path GetExecutableDir(const char* argv0) {
     return std::filesystem::current_path();
 }
 
+std::string ShapeToString(const std::vector<int64_t>& shape) {
+    std::ostringstream oss;
+    oss << '[';
+    for (std::size_t i = 0; i < shape.size(); ++i) {
+        if (i > 0) {
+            oss << ',';
+        }
+        oss << shape[i];
+    }
+    oss << ']';
+    return oss.str();
+}
+
 void PrintUsage() {
     std::cout
         << "用法: edge_infer_service [选项]\n"
         << "  --model <path>             ONNX 模型路径\n"
         << "  --host <ip>                监听地址 (默认 0.0.0.0)\n"
         << "  --port <N>                 监听端口 (默认 9000)\n"
-        << "  --feature-dim <N>          输入特征维度 (默认 187)\n"
+        << "  --feature-dim <N>          原始输入特征维度 (默认 187)\n"
         << "  --critical-threshold <v>   critical 告警阈值\n"
         << "  --io-threads <N>           会话 io 线程数 (默认 4)\n"
+        << "  --sample-dir <path>        模拟采集样本目录，启用 LIST_SAMPLES/PLAY_SAMPLE\n"
         << "  --log-dir <path>           日志目录 (默认 程序目录/logs)\n"
+        << "\n说明:\n"
+        << "  服务会根据 ONNX 输入形状自动识别模型类型。\n"
+        << "  - [N,1,187] 走原始 1D-CNN 输入\n"
+        << "  - [N,1,17,11] 走论文参考模型前处理: 滤波 -> 归一化 -> STFT\n"
         << "\n协议:\n"
         << "  PING\n"
         << "  PREDICT f1,f2,...,f187\n"
+        << "  LIST_SAMPLES\n"
+        << "  PLAY_SAMPLE <name>\n"
         << "  QUIT\n";
 }
 
@@ -94,6 +118,8 @@ Args ParseArgs(int argc, char* argv[]) {
             if (args.io_threads == 0) {
                 throw std::invalid_argument("--io-threads 必须大于 0");
             }
+        } else if (key == "--sample-dir") {
+            args.sample_dir = need_value("--sample-dir");
         } else if (key == "--log-dir") {
             args.log_dir = need_value("--log-dir");
         } else if (key == "--help" || key == "-h") {
@@ -126,22 +152,30 @@ int main(int argc, char* argv[]) {
         gp::logging::Logger::Instance().Info("监听地址: ", args.host, ':', args.port);
         gp::logging::Logger::Instance().Info("日志目录: ", log_options.log_dir.string());
 
-        // 1) 推理配置与推理引擎
         edge::service::InferenceConfig infer_config;
         infer_config.model_path = args.model_path;
         infer_config.feature_dim = args.feature_dim;
         infer_config.critical_threshold = args.critical_threshold;
 
         auto engine = std::make_shared<edge::service::InferenceEngine>(infer_config);
+        gp::logging::Logger::Instance().Info("模型输入模式: ", engine->input_mode());
+        gp::logging::Logger::Instance().Info("模型输入形状: ", ShapeToString(engine->model_input_shape()));
+        gp::logging::Logger::Instance().Info("原始输入特征维度: ", engine->feature_dim());
 
-        // 2) 逻辑分发层
-        auto logic_system = std::make_shared<edge::logic::LogicSystem>(engine);
+        std::shared_ptr<edge::service::SampleRepository> sample_repository;
+        if (!args.sample_dir.empty()) {
+            sample_repository = std::make_shared<edge::service::SampleRepository>(args.sample_dir, args.feature_dim);
+            gp::logging::Logger::Instance().Info("样本目录: ", args.sample_dir);
+            gp::logging::Logger::Instance().Info("已加载样本数: ", sample_repository->ListNames().size());
+        } else {
+            gp::logging::Logger::Instance().Warning("未配置样本目录，LIST_SAMPLES/PLAY_SAMPLE 命令不可用");
+        }
 
-        // 3) 会话线程池
+        auto logic_system = std::make_shared<edge::logic::LogicSystem>(engine, sample_repository);
+
         edge::net::IOContextPool io_pool(args.io_threads);
         io_pool.Start();
 
-        // 4) 接入线程（专用于 accept）
         boost::asio::io_context accept_ioc;
         auto server = std::make_shared<edge::net::TcpServer>(
             accept_ioc,

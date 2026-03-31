@@ -2,6 +2,7 @@
 
 #include <boost/asio.hpp>
 
+#include <atomic>
 #include <cstddef>
 #include <memory>
 #include <thread>
@@ -32,7 +33,7 @@ private:
     std::vector<std::shared_ptr<boost::asio::io_context>> io_contexts_;
     std::vector<std::shared_ptr<WorkGuard>> works_;
     std::vector<std::thread> threads_;
-    std::size_t next_index_ = 0;
+    std::atomic<std::size_t> next_index_{0};
 };
 
 }  // namespace edge::net

@@ -2,6 +2,7 @@
 
 #include <QApplication>
 #include <QCoreApplication>
+#include <QFile>
 
 #include <filesystem>
 
@@ -11,8 +12,21 @@
 int main(int argc, char *argv[])
 {
     QApplication a(argc, argv);
+
+    QFile qss_file(":/styles/global.qss");
+    if (qss_file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        a.setStyleSheet(QString::fromUtf8(qss_file.readAll()));
+    }
     qRegisterMetaType<ServerInfo>("ServerInfo");
+    qRegisterMetaType<LoginUserInfo>("LoginUserInfo");
+    qRegisterMetaType<PatientInfo>("PatientInfo");
+    qRegisterMetaType<QVector<PatientInfo>>("QVector<PatientInfo>");
+    qRegisterMetaType<MonitorRecordInfo>("MonitorRecordInfo");
+    qRegisterMetaType<QVector<MonitorRecordInfo>>("QVector<MonitorRecordInfo>");
+    qRegisterMetaType<AlertInfo>("AlertInfo");
+    qRegisterMetaType<QVector<AlertInfo>>("QVector<AlertInfo>");
     qRegisterMetaType<PredictResult>("PredictResult");
+    qRegisterMetaType<BeatResponse>("BeatResponse");
     qRegisterMetaType<ClientState>("ClientState");
 
     gp::logging::LoggerOptions log_options;
