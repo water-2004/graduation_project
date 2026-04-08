@@ -1,22 +1,21 @@
-﻿#include "mainwindow.h"
-
-#include <QApplication>
-#include <QCoreApplication>
-#include <QFile>
+﻿#include <QCoreApplication>
+#include <QFont>
+#include <QGuiApplication>
+#include <QQmlApplicationEngine>
+#include <QQmlContext>
 
 #include <filesystem>
 
+#include "ViewModels/AppViewModel.h"
 #include "global.h"
 #include "logger.h"
 
-int main(int argc, char *argv[])
-{
-    QApplication a(argc, argv);
+int main(int argc, char* argv[]) {
+    QGuiApplication app(argc, argv);
+    app.setApplicationName(QStringLiteral("graduation_project_widget"));
+    app.setOrganizationName(QStringLiteral("graduation_project"));
+    app.setFont(QFont(QStringLiteral("Microsoft YaHei"), 10));
 
-    QFile qss_file(":/styles/global.qss");
-    if (qss_file.open(QIODevice::ReadOnly | QIODevice::Text)) {
-        a.setStyleSheet(QString::fromUtf8(qss_file.readAll()));
-    }
     qRegisterMetaType<ServerInfo>("ServerInfo");
     qRegisterMetaType<LoginUserInfo>("LoginUserInfo");
     qRegisterMetaType<PatientInfo>("PatientInfo");
@@ -34,13 +33,24 @@ int main(int argc, char *argv[])
     log_options.log_dir = std::filesystem::path(QCoreApplication::applicationDirPath().toStdString()) / "logs";
     log_options.min_level = gp::logging::LogLevel::Debug;
     gp::logging::Logger::Instance().Initialize(log_options);
-    gp::logging::Logger::Instance().Info("Qt 客户端启动");
+    gp::logging::Logger::Instance().Info("QML 客户端启动");
 
-    QObject::connect(&a, &QCoreApplication::aboutToQuit, []() {
-        gp::logging::Logger::Instance().Info("Qt 客户端退出");
+    QObject::connect(&app, &QCoreApplication::aboutToQuit, []() {
+        gp::logging::Logger::Instance().Info("QML 客户端退出");
     });
 
-    MainWindow w;
-    w.show();
-    return a.exec();
+    AppViewModel app_view_model;
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("appViewModel"), &app_view_model);
+
+    const QUrl url(QStringLiteral("qrc:/qt/qml/graduation_project/widget/UI/Main.qml"));
+    QObject::connect(
+        &engine,
+        &QQmlApplicationEngine::objectCreationFailed,
+        &app,
+        []() { QCoreApplication::exit(-1); },
+        Qt::QueuedConnection);
+    engine.load(url);
+
+    return app.exec();
 }

@@ -584,6 +584,9 @@ bool BusinessClient::ParseAlertText(const QString& text, AlertInfo* alert_info) 
     alert_info->source = fields[6].trimmed();
     alert_info->sample_name = fields[7].trimmed();
     alert_info->status = fields[8].trimmed();
+    if (alert_info->status == QStringLiteral("new")) {
+        alert_info->status = QStringLiteral("pending");
+    }
     if (fields.size() >= 11) {
         alert_info->confirmed_at = fields[9].trimmed();
         alert_info->confirmed_by = fields[10].trimmed();

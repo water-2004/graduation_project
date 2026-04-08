@@ -1,6 +1,0 @@
-<RCC>
-    <qresource prefix="/">
-        <file>styles/global.qss</file>
-        <file>data/model_metrics.json</file>
-    </qresource>
-</RCC>

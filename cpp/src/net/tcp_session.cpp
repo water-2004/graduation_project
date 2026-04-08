@@ -13,11 +13,11 @@ void TcpSession::Start() {
 
 void TcpSession::DoRead() {
     auto self = shared_from_this();
-    // 按”行”读取协议消息（\n 分隔）。
+    // 按"行"读取协议消息（\n 分隔）。
     boost::asio::async_read_until(socket_, read_buffer_, '\n', [self](const boost::system::error_code& ec, std::size_t bytes_transferred) {
         if (ec) {
             if (ec != boost::asio::error::eof && ec != boost::asio::error::connection_reset) {
-                gp::logging::Logger::Instance().Error(“会话读取失败: “, ec.message());
+                gp::logging::Logger::Instance().Error("会话读取失败: ", ec.message());
             }
             return;
         }
@@ -25,9 +25,9 @@ void TcpSession::DoRead() {
         // 防止恶意超长输入导致资源耗尽。
         if (bytes_transferred > kMaxLineLength) {
             gp::logging::Logger::Instance().Warning(
-                “输入行过长（”, bytes_transferred, “ 字节），断开连接”);
+                "输入行过长（", bytes_transferred, " 字节），断开连接");
             self->read_buffer_.consume(self->read_buffer_.size());
-            self->DoWrite(“ERR 输入过长”, true);
+            self->DoWrite("ERR 输入过长", true);
             return;
         }
 
@@ -67,3 +67,4 @@ void TcpSession::DoWrite(const std::string& response, bool close_after_write) {
 }
 
 }  // namespace edge::net
+
