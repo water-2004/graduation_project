@@ -1,5 +1,7 @@
 ﻿#include "business/business_logic.h"
 
+#include "business/business_packet_adapter.h"
+
 #include <algorithm>
 #include <cctype>
 #include <sstream>
@@ -330,6 +332,18 @@ std::string BusinessLogic::HandleLine(const std::string& line, bool* close_conn)
     return it->second(payload, close_conn);
 }
 
+gp::protocol::Packet BusinessLogic::HandlePacket(
+    const gp::protocol::Packet& request,
+    bool* close_conn) const {
+    return HandleBusinessPacket(
+        request.message_type,
+        request.payload,
+        [this](const std::string& line, bool* close_conn_inner) {
+            return this->HandleLine(line, close_conn_inner);
+        },
+        close_conn);
+}
+
 std::string BusinessLogic::Trim(const std::string& text) {
     std::size_t begin = 0;
     while (begin < text.size() && std::isspace(static_cast<unsigned char>(text[begin])) != 0) {
@@ -414,4 +428,7 @@ void BusinessLogic::Register(const std::string& cmd, CommandHandler handler) {
 }
 
 }  // namespace gp::backend
+
+
+
 

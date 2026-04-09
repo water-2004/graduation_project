@@ -2,18 +2,17 @@
 #define TCPMGR_H
 
 #include <QByteArray>
-#include <QMap>
+#include <QJsonObject>
 #include <QObject>
 #include <QStringList>
 #include <QTcpSocket>
 #include <QTimer>
 
-#include <functional>
-
 #include "global.h"
+#include "protocol/message_protocol.h"
 #include "singleton.h"
 
-// 网络层管理器：专门负责 TCP 连接、协议收发和响应分发。
+// 推理网络管理器：负责边缘推理服务的 TCP 连接、JSON 协议收发和结果分发。
 class TcpMgr : public QObject, public Singleton<TcpMgr>
 {
     Q_OBJECT
@@ -28,10 +27,9 @@ private:
     friend class Singleton<TcpMgr>;
     TcpMgr();
 
-    void initHandlers();
     void processBuffer();
-    void handleLine(const QString& line);
-    void sendLine(const QString& line);
+    void handlePacket(const gp::protocol::Packet& packet);
+    void sendPacket(gp::protocol::MessageType type, const QJsonObject& payload = QJsonObject());
     void emitLog(const QString& text);
 
     static constexpr int kConnectTimeoutMs = 10000;
@@ -41,7 +39,6 @@ private:
     QTcpSocket _socket;
     QByteArray _buffer;
     ClientState _state;
-    QMap<QString, std::function<void(const QString& line)>> _handlers;
 
     QTimer connect_timer_;
     QTimer reconnect_timer_;
@@ -70,5 +67,4 @@ signals:
     void sig_protocol_error(const QString& text);
 };
 
-#endif // TCPMGR_H
-
+#endif  // TCPMGR_H

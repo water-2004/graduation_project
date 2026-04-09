@@ -1,160 +1,184 @@
-﻿# 基于边缘设备的心电异常检测系统
+﻿# 基于边缘计算的心电异常检测系统
 
 ## 项目简介
 
-本项目是毕业设计项目，目标是实现一个“基于边缘设备的心电异常检测系统”。系统以 MIT-BIH 心电数据集为基础，使用 Python 完成数据处理与模型训练，将模型导出为 ONNX 后部署到边缘端，最终由 C++/Qt 客户端完成业务管理、监测展示和报警交互。
+本项目是毕业设计项目，目标是实现一套面向边缘设备部署的心电异常检测系统。系统以 MIT-BIH 心电数据集为基础，使用 Python 完成数据处理、模型训练与 ONNX 导出，使用 C++ 实现边缘推理服务与业务服务，使用 Qt/QML 实现桌面监测客户端，最终形成“模型训练 + 边缘推理 + 业务管理 + 可视化监测”的完整闭环。
 
-当前系统的主线链路如下：
+当前系统主要面向课程设计 / 毕业设计答辩场景，已经完成从样本加载、模型推理、告警生成到前端展示的主流程联调。当前采集端采用模拟数据链路，后续可以继续扩展真实传感器接入。
 
-```text
-MIT-BIH 数据集
-  -> Python 数据清洗与模型训练
-  -> ONNX 模型导出
-  -> C++ 边缘推理服务
-  -> C++ 业务服务
-  -> Qt 桌面客户端
-```
+## 项目特点
 
-本项目的技术路线是：
-
-- Python 负责数据处理、模型训练、实验对比与 ONNX 导出
-- C++ 负责边缘推理服务和业务服务
-- Qt 负责桌面端界面与交互
-- Boost.Asio 负责服务端与客户端网络通信
-- SQLite 负责当前业务数据持久化
+- 以参考文献《Reliable ECG Anomaly Detection on Edge Devices for Internet of Medical Things Applications》的方法路线为主线，复现并优化 `STFT + 2D-CNN` 模型。
+- 支持将训练得到的模型导出为 ONNX，并部署到香橙派 3（Orange Pi 3，2GB）等边缘设备上运行。
+- 使用 C++ 构建双服务端架构：`edge_infer_service` 负责边缘推理，`business_service` 负责登录、病人、监测记录、报警等业务。
+- 使用 Qt/QML 构建桌面客户端，当前界面流程为“登录 -> 主界面 -> 仪表盘 / 病人管理 / 实时监测 / 报警中心 / 关于页面”。
+- 已实现严重报警弹窗、提示音、监测历史、网络超时与自动重连、密码加密存储、SQLite 持久化、日志记录等功能。
+- 旧版 QWidget 客户端代码已归档，当前主开发版本为 QML 前端。
 
 ## 系统架构
 
+```text
+MIT-BIH 数据集 / 模拟采样数据
+  -> Python 数据清洗与模型训练
+  -> ONNX 模型导出
+  -> C++ 边缘推理服务 edge_infer_service
+  -> C++ 业务服务 business_service
+  -> Qt/QML 客户端 graduation_project_widget
+```
+
 ### 1. 训练与模型侧
 
-- 数据集：`MIT-BIH/`
-- 数据处理脚本：`scripts/`
-- 论文参考模型训练脚本：`scripts/09_train_paper_reference.py`
-- 优化版本训练脚本：`scripts/11_train_paper_optimized.py`
-- 模型对比脚本：`scripts/12_compare_all_models.py`
-
-当前系统在论文路线下，主模型参考文献《Reliable ECG Anomaly Detection on Edge Devices for Internet of Medical Things Applications》，并围绕该路线做了训练、对比和部署适配。
+- 数据分析与清洗：`scripts/01_profile_data.py`、`scripts/02_prepare_mitbih.py`
+- 基线模型训练：`scripts/03_train_cnn.py`、`scripts/05_train_random_forest.py`、`scripts/06_train_xgboost.py`
+- 论文方法复现：`scripts/09_train_paper_reference.py`
+- 论文方法优化：`scripts/11_train_paper_optimized.py`
+- 多模型综合对比：`scripts/12_compare_all_models.py`
 
 ### 2. 边缘推理侧
 
-边缘端核心目标：
+`edge_infer_service` 负责：
 
 - 加载 ONNX 模型
-- 对外提供 TCP 推理服务
-- 接收客户端发送的心拍样本
-- 返回预测类别、置信度、告警等级和耗时
+- 接收客户端发送的心电样本
+- 完成前处理、模型推理与结果封装
+- 返回预测类别、置信度、报警等级、推理耗时等结果
 
-当前边缘端支持两类模型输入：
+当前支持两类模型输入：
 
 1. 一维心拍输入 `[N,1,187]`
 2. 论文参考模型输入 `[N,1,17,11]`
 
-当加载论文参考模型时，边缘服务会自动执行：
+当加载论文参考模型或其优化模型时，边缘端会自动完成：
 
 1. 带通滤波
 2. 归一化
-3. STFT 频谱变换
-4. 构造 `1 x 17 x 11` 张量
+3. STFT 变换
+4. 构造 `1 x 17 x 11` 输入张量
 5. 调用 ONNX Runtime 推理
-
-这意味着 Qt 客户端无需修改协议，仍然只需要发送 `187` 个原始采样点。
 
 ### 3. 业务服务侧
 
-业务服务由 C++ 编写，当前已支持：
+`business_service` 负责：
 
 - 登录认证
+- 用户密码校验与修改
 - 病人信息管理
 - 监测记录保存
-- 报警记录生成、查询与确认
+- 报警记录生成、查询、确认
 - SQLite 数据持久化
-- 与 Qt 客户端的统一业务协议交互
+- 与 Qt 客户端的业务协议交互
 
-### 4. Qt 客户端侧
+### 4. Qt/QML 客户端侧
 
-Qt 客户端位于 `widget/graduation_project_widget/`，当前主要页面包括：
+当前客户端位于 `widget/graduation_project_widget/`，采用 QML + C++ Backend 的分层结构：
 
-- 登录页 `LoginPage`
-- 仪表盘页 `DashboardPage`
-- 病人管理页 `PatientPage`
-- 报警中心页 `AlarmCenterPage`
-- 推理监测页 `InferPage`
-- 关于页 `AboutPage`
+- `Backend/`：网络、认证、报警管理
+- `Models/`：病人、报警、历史、时间线、波形数据模型
+- `ViewModels/`：页面状态与业务协调
+- `UI/Components/`：通用组件
+- `UI/Pages/`：登录、仪表盘、病人管理、监测、报警中心、关于页面
 
-当前客户端通信拆分为两条链路：
+旧版 QWidget 客户端已归档到：`widget/graduation_project_widget_legacy/`
 
-- 业务链路：Qt -> `business_service`
-- 推理链路：Qt -> `edge_infer_service`
+## 当前模型选择与实验结论
+
+本项目前期完成了多模型对比，后期将“参考文献算法复现”作为主线推进。当前仓库默认展示和部署的主模型为：
+
+- `OptimizedReferencePaperSTFT2DCNN`
+- 即：基于参考文献路线的优化版 `STFT + 2D-CNN`
+
+当前模型指标来自 `widget/graduation_project_widget/data/model_metrics.json`：
+
+| 模型 | Accuracy | Macro-F1 | Macro-Recall | 说明 |
+| --- | ---: | ---: | ---: | --- |
+| 优化后参考论文 STFT+2D-CNN | 97.41% | 87.74% | 91.40% | 当前系统默认展示 / 部署模型 |
+| Random Forest | 97.91% | 89.93% | 89.42% | 对比实验综合指标最优 |
+| XGBoost | 97.12% | 86.57% | 90.28% | 对比实验次优 |
+| 论文风格 STFT+2D-CNN（早期版） | 92.86% | 74.86% | 91.29% | 初版复现结果 |
+| 1D-CNN | 90.49% | 71.42% | 88.28% | 早期工程基线 |
+
+### 为什么当前系统默认部署论文参考优化模型
+
+原因有三点：
+
+- 毕设主线需要与参考文献保持一致，论文撰写时更容易说明“模型来源、算法流程和优化过程”。
+- 该模型已经完成 STFT 前处理、ONNX 导出和 C++ 边缘推理链路适配，更符合“边缘医疗监测系统”的整体主题。
+- 虽然随机森林在综合指标上略高，但深度模型在论文表达、前处理链路展示、边缘推理流程呈现方面更完整，更适合作为系统主模型；树模型保留为对比实验基线。
+
+需要说明的是：当前实现仍基于 MIT-BIH 单拍 `187` 点输入，不是参考文献中的完整 `10` 秒滑动窗口，因此属于“参考文献方法路线复现与工程化优化”，而不是逐项完全复刻原论文实验环境。
+
+## 当前已实现功能
+
+### 已完成的核心功能
+
+- MIT-BIH 数据分析、清洗、样本准备
+- 多模型训练、评估、对比、ONNX 导出
+- C++ 边缘推理服务
+- C++ 业务服务
+- Qt/QML 登录界面与主界面
+- 仪表盘指标展示、图表展示、监测历史展示
+- 病人管理、报警中心、报警详情展示
+- 严重报警弹窗与音效提醒
+- 网络超时检测与自动重连
+- 密码加密与修改
+- SQLite 持久化
+- 日志系统
+- 香橙派 3 边缘部署联调
+
+### 当前系统主流程
+
+```text
+登录
+  -> 进入主界面
+  -> 查看系统概览与模型指标
+  -> 进入实时监测页
+  -> 播放样本 / 模拟采集数据
+  -> 将心电片段发送到 edge_infer_service
+  -> 边缘端返回类别、置信度、告警等级、耗时
+  -> 客户端更新波形、状态、历史记录
+  -> 若为严重异常，则弹出报警提示并写入报警中心
+  -> 业务服务保存监测记录与报警记录
+```
 
 ## 目录结构
 
 ```text
 F:\graduation_project
-├─ cpp/                           C++ 推理服务、业务服务、网络层与单元测试
-├─ widget/                        Qt 客户端工程
-├─ scripts/                       Python 数据处理、训练和模型对比脚本
+├─ cpp/                           C++ 边缘推理服务、业务服务、网络层、测试
+├─ widget/
+│  ├─ graduation_project_widget/  当前 Qt/QML 客户端
+│  └─ graduation_project_widget_legacy/  归档的旧版 QWidget 客户端
+├─ scripts/                       Python 数据处理、训练、对比脚本
 ├─ shared/                        共享模块，例如日志系统
-├─ docs/                          中文技术文档、运行说明、部署说明
-├─ data/                          运行时业务数据目录（默认不纳入 Git）
+├─ docs/                          中文技术文档、运行文档、部署文档
 ├─ MIT-BIH/                       原始数据集（默认不纳入 Git）
 ├─ processed/                     处理后的训练数据（默认不纳入 Git）
-├─ artifacts/                     训练得到的模型产物（默认不纳入 Git）
-├─ results/                       实验结果与导出样本（默认不纳入 Git）
-└─ build/                         构建目录（默认不纳入 Git）
+├─ artifacts/                     模型产物（默认不纳入 Git）
+├─ results/                       实验结果与联调样本（默认不纳入 Git）
+├─ build/                         构建目录（默认不纳入 Git）
+└─ doc/                           Word 原始材料（默认不纳入 Git）
 ```
 
-## 主要构建目标
+## 需要自行准备的资源
 
-### C++ 目标
+由于仓库体积和版权原因，以下内容默认不上传到 GitHub：
 
-位于 [cpp/CMakeLists.txt](cpp/CMakeLists.txt)：
+- `MIT-BIH/` 原始数据集
+- `processed/` 处理后数据
+- `artifacts/` 训练得到的模型文件（如 `model_best.onnx`）
+- `results/qt_real_samples/` 联调用样本
+- `third_party/` 大体积第三方依赖
+- `build/` 构建产物
+- `data/` 运行期数据库和日志
 
-- `edge_infer`
-  单机命令行推理程序
-- `edge_infer_service`
-  边缘推理 TCP 服务
-- `business_service`
-  业务服务端
-- `test_sha256`
-  SHA-256 单元测试
-- `test_business_logic`
-  业务逻辑单元测试
+因此，首次克隆仓库后，至少需要你本地准备：
 
-### Qt 目标
-
-位于 [widget/graduation_project_widget/CMakeLists.txt](widget/graduation_project_widget/CMakeLists.txt)：
-
-- `graduation_project_widget`
-  Qt 桌面客户端
-
-## 关键脚本说明
-
-位于 `scripts/`：
-
-- `01_profile_data.py`
-  数据集概览与统计分析
-- `02_prepare_mitbih.py`
-  MIT-BIH 数据清洗、切分与样本准备
-- `03_train_cnn.py`
-  基础 CNN 训练脚本
-- `04_export_qt_real_samples.py`
-  导出 Qt 端联调用真实样本
-- `05_train_random_forest.py`
-  随机森林基线模型
-- `06_train_xgboost.py`
-  XGBoost 基线模型
-- `07_compare_models.py`
-  多模型实验对比
-- `08_train_paper_style_cnn.py`
-  论文风格模型尝试
-- `09_train_paper_reference.py`
-  论文参考模型训练脚本
-- `10_export_business_data_to_sqlite.py`
-  业务侧数据导出/整理脚本
-- `11_train_paper_optimized.py`
-  论文参考模型优化版训练脚本
-- `12_compare_all_models.py`
-  多组模型综合对比脚本
+- MIT-BIH 数据集
+- ONNX Runtime
+- Boost
+- SQLite 运行库 / 开发库
+- 用于联调的 ONNX 模型文件
+- 如需演示播放样本，还需要 `results/qt_real_samples/`
 
 ## 开发环境
 
@@ -163,32 +187,29 @@ F:\graduation_project
 - Windows 10 / 11
 - Anaconda 环境：`graduation_project`
 - Python 3.10+
-- Qt Creator 15.0.0 Community
 - Qt 6.x
-- Visual Studio 2022 Build Tools 或 Community
+- Qt Creator 15.0.0 Community
+- Visual Studio 2022 Build Tools / Community
 - CMake 3.20+
 - Boost 1.87.0
 - ONNX Runtime
 
-### 香橙派 3 部署环境
+### 香橙派部署环境
 
 - 板卡：Orange Pi 3，2GB
-- 系统：建议使用稳定版 Ubuntu / Debian 系 Linux
-- 架构：`aarch64`
-- 编译环境：`cmake`、`g++`
-- 推理依赖：ONNX Runtime Linux 版
+- 系统：Ubuntu / Debian（`aarch64`）
+- 编译工具：`cmake`、`g++`
+- 推理依赖：ONNX Runtime Linux `aarch64` 版本
 
 ## 快速开始
 
 ### 1. Python 环境
 
-如果已经创建过 Anaconda 环境，可以直接激活：
-
 ```powershell
 conda activate graduation_project
 ```
 
-### 2. C++ 服务端构建
+### 2. 构建 C++ 服务端
 
 首次配置：
 
@@ -210,27 +231,27 @@ cmake --build F:\graduation_project\build\cpp --config Release --target edge_inf
 cmake --build F:\graduation_project\build\cpp --config Release --target business_service
 ```
 
-### 3. Qt 客户端构建
+### 3. 构建 Qt/QML 客户端
 
 推荐直接用 Qt Creator 打开：
 
-- [widget/graduation_project_widget/CMakeLists.txt](widget/graduation_project_widget/CMakeLists.txt)
+- `widget/graduation_project_widget/CMakeLists.txt`
 
-也可以使用命令行方式：
+也可以使用命令行：
 
 ```powershell
 cmake -S F:\graduation_project\widget\graduation_project_widget `
-  -B F:\graduation_project\build\widget
-cmake --build F:\graduation_project\build\widget --config Release
+  -B F:\graduation_project\build\widget_qml
+cmake --build F:\graduation_project\build\widget_qml --config Release
 ```
 
 ## 启动顺序
 
 联调时建议按下面顺序启动：
 
-1. 香橙派启动 `edge_infer_service`
-2. Windows 启动 `business_service`
-3. Windows 启动 Qt 客户端
+1. 启动 `business_service`
+2. 启动 `edge_infer_service`
+3. 启动 Qt 客户端
 
 ### 1. 启动业务服务
 
@@ -253,7 +274,7 @@ Windows 本机示例：
 
 ```powershell
 F:\graduation_project\build\cpp\Release\edge_infer_service.exe `
-  --model F:\graduation_project\artifacts\paper_reference_cnn_full_v1\model_best.onnx `
+  --model F:\graduation_project\artifacts\paper_optimized_cnn\model_best.onnx `
   --host 0.0.0.0 `
   --port 9000 `
   --sample-dir F:\graduation_project\results\qt_real_samples
@@ -263,130 +284,119 @@ F:\graduation_project\build\cpp\Release\edge_infer_service.exe `
 
 ```bash
 ./edge_infer_service \
-  --model ~/graduation_project/artifacts/paper_reference_cnn_full_v1/model_best.onnx \
+  --model ~/graduation_project/artifacts/paper_optimized_cnn/model_best.onnx \
   --host 0.0.0.0 \
   --port 9000 \
   --sample-dir ~/graduation_project/results/qt_real_samples
 ```
 
-### 3. Qt 客户端联调
+### 3. 启动 Qt 客户端
 
-Qt 客户端连接成功后，可以依次测试：
+可在 Qt Creator 中直接运行 `graduation_project_widget`，也可以运行构建目录中的可执行文件。
+
+客户端连接成功后，可以依次测试：
 
 1. 登录
-2. 病人增删改查
-3. 连接边缘端
-4. 播放样本并显示波形
-5. 写入监测记录
-6. 生成报警并在报警中心查看
-7. 报警详情弹窗与确认
-8. 修改密码
-9. 超时与自动重连
+2. 病人管理
+3. 边缘端连接状态
+4. 播放样本与实时波形显示
+5. 推理结果与历史记录
+6. 严重报警弹窗与音效
+7. 报警中心记录与确认
+8. 密码修改
+9. 超时与重连
 
-## 香橙派部署更新步骤
+## 香橙派 3 部署说明
 
-当 Windows 上改动了边缘端代码后，要让香橙派运行最新版本，需要重新同步源码并重新编译。建议按下面步骤操作。
+Windows 上修改边缘端代码后，要让香橙派运行最新版本，需要重新同步源码并重新编译。基本步骤如下：
 
-### 1. 在 Windows 上确认最新文件
+### 1. 同步最新代码
 
-至少需要同步：
-
-- `cpp/`
-- `shared/`
-- `artifacts/paper_reference_cnn_full_v1/model_best.onnx`
-- 如需样本联调，再同步 `results/qt_real_samples/`
-
-### 2. 传到香橙派
-
-如果你已经把仓库放到 GitHub，最简单的方式是板子上执行：
+如果板子上已经克隆仓库：
 
 ```bash
 cd ~/graduation_project
 git pull origin main
 ```
 
-如果暂时不用 GitHub，也可以用 `scp` / `sftp` / `WinSCP` 直接覆盖上传对应目录。
+如果不通过 Git，也可以使用 WinSCP / SFTP / SCP 手动覆盖上传以下目录：
 
-### 3. 在香橙派重新编译
+- `cpp/`
+- `shared/`
+- `artifacts/` 中的模型文件
+- `results/qt_real_samples/`（如果需要联调样本播放）
+
+### 2. 重新编译
 
 ```bash
 cd ~/graduation_project
-mkdir -p build/cpp
-cd build/cpp
-cmake ../../cpp -DONNXRUNTIME_ROOT=/path/to/onnxruntime
-cmake --build . --config Release -j2
+mkdir -p build_orangepi
+cd build_orangepi
+cmake ../cpp -DONNXRUNTIME_ROOT=~/third_party/onnxruntime-linux-aarch64-1.23.2
+cmake --build . --target edge_infer_service -j2
 ```
 
-Orange Pi 3 为 2GB 内存，建议使用：
+Orange Pi 3 为 2GB 内存，建议优先使用：
 
 - `-j2`
-- 或更保守的 `-j1`
-
-### 4. 启动并验证
-
-```bash
-./edge_infer_service \
-  --model ~/graduation_project/artifacts/paper_reference_cnn_full_v1/model_best.onnx \
-  --host 0.0.0.0 \
-  --port 9000 \
-  --sample-dir ~/graduation_project/results/qt_real_samples
-```
-
-验证要点：
-
-- 服务能正常启动
-- 日志显示模型已加载
-- Qt 可以连上板子 IP 的 `9000` 端口
-- 样本预测能返回类别、置信度和报警等级
-
-更完整的联调步骤见：
-
-- [docs/香橙派边缘端部署与联调测试说明.md](docs/香橙派边缘端部署与联调测试说明.md)
-- [docs/论文参考模型边缘部署说明.md](docs/论文参考模型边缘部署说明.md)
-
-
-为了避免仓库过大，以下内容默认不纳入 Git：
-
-- 数据集 `MIT-BIH/`
-- 运行时数据 `data/`
-- 训练中间结果 `processed/`
-- 模型产物 `artifacts/`
-- 实验输出 `results/`
-- 构建目录 `build/`
-- 原始 Word 材料 `doc/`
-- 本地工具配置 `.claude/`
-
-因此，GitHub 仓库主要保存：
-
-- 源代码
-- Qt 工程
-- CMake 工程
-- 中文技术文档
-- 配置与协议设计
-
+- 如果内存紧张，再改为 `-j1`
 
 ## 文档索引
 
-当前已有的关键文档包括：
+更多中文技术文档见：[`docs/`](docs/)
 
-- [docs/业务服务端设计说明.md](docs/业务服务端设计说明.md)
-- [docs/业务服务端运行说明.md](docs/业务服务端运行说明.md)
-- [docs/论文参考模型边缘部署说明.md](docs/论文参考模型边缘部署说明.md)
-- [docs/香橙派边缘端部署与联调测试说明.md](docs/香橙派边缘端部署与联调测试说明.md)
-- [docs/模拟采集与波形显示说明.md](docs/模拟采集与波形显示说明.md)
-- [docs/网络超时与自动重连技术说明.md](docs/网络超时与自动重连技术说明.md)
-- [docs/用户密码安全与修改技术说明.md](docs/用户密码安全与修改技术说明.md)
-- [docs/监测记录与报警模块运行说明.md](docs/监测记录与报警模块运行说明.md)
+建议优先阅读：
 
-## 当前阶段总结
+- [`docs/`](docs/) 目录下的论文方法复现、边缘部署、QML 前端架构、报警模块、网络重连等文档
+- [`cpp/CMakeLists.txt`](cpp/CMakeLists.txt)
+- [`widget/graduation_project_widget/CMakeLists.txt`](widget/graduation_project_widget/CMakeLists.txt)
+- [`scripts/`](scripts/)
 
-当前项目已经具备以下基础能力：
+## 当前阶段说明
 
-- 完整的数据处理与模型训练流程
-- 论文参考模型训练与 ONNX 导出
-- C++ 边缘推理服务
-- C++ 业务服务与 SQLite 持久化
-- Qt 桌面客户端分层页面结构
-- 登录、病人管理、监测记录、报警中心、报警详情、密码修改
-- 网络超时与自动重连
+当前项目已经不是“只有模型脚本”的阶段，而是已经具备以下完整闭环能力：
 
+- 算法训练
+- 模型对比
+- ONNX 导出
+- 边缘推理
+- 业务服务
+- 桌面端监测
+- 报警联动
+- 香橙派部署联调
+
+如果你接下来用于毕业论文撰写，README 对应的项目主线可以概括为：
+
+“以 MIT-BIH 心电数据集为基础，参考文献《Reliable ECG Anomaly Detection on Edge Devices for Internet of Medical Things Applications》的算法路线，设计并实现了一套基于边缘计算的心电异常检测系统。系统采用 Python 完成模型训练与优化，采用 C++ 构建边缘推理与业务服务，采用 Qt/QML 构建监测客户端，并在香橙派 3 上完成边缘部署验证。”
+
+
+
+## 自定义 JSON 报文协议
+
+为提升系统在 Qt 客户端、业务服务端和边缘推理服务之间的通信规范性，当前项目已经将原先的按行文本协议升级为“固定包头 + JSON 负载”的自定义应用层协议。
+
+协议结构如下：
+
+```text
+[ 魔数 (2 Bytes) ] [ 版本号 (1 Byte) ] [ 消息类型 (2 Bytes) ] [ 负载长度 (4 Bytes) ] [ 负载数据 Payload (N Bytes) ]
+| <------------------------- 包头 Header (固定 9 字节) -------------------------> | <------- 包体 Payload -------> |
+```
+
+协议要点：
+
+- 魔数固定为 `0x4750`（ASCII: `GP`）
+- 版本号当前为 `0x01`
+- 字节序统一为大端序
+- 包体统一为 JSON 对象
+- 推理服务和业务服务均已接入该协议
+- Qt 客户端当前也已完成协议同步改造
+
+这样做的好处是：
+
+- 字段语义更清晰，便于后续扩展
+- 不再依赖文本分隔符，协议更稳定
+- 更适合论文中描述“系统通信协议设计”部分
+
+详细说明见：
+
+- [`docs/自定义JSON报文协议说明.md`](docs/自定义JSON报文协议说明.md)

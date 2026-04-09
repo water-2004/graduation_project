@@ -2,12 +2,15 @@
 #define BUSINESS_CLIENT_H
 
 #include <QByteArray>
+#include <QJsonObject>
+#include <QJsonValue>
 #include <QObject>
 #include <QTcpSocket>
 #include <QTimer>
 #include <QVector>
 
 #include "global.h"
+#include "protocol/message_protocol.h"
 
 // 业务服务端客户端：负责登录链路、病人管理链路和业务记录链路。
 class BusinessClient : public QObject {
@@ -60,15 +63,15 @@ signals:
 
 private:
     void ProcessBuffer();
-    void HandleLine(const QString& line);
-    void SendLine(const QString& line);
+    void HandlePacket(const gp::protocol::Packet& packet);
+    void SendPacket(gp::protocol::MessageType type, const QJsonObject& payload = QJsonObject());
     void EmitLog(const QString& text);
     bool EnsureConnected();
 
-    static bool ParsePatientText(const QString& text, PatientInfo* patient_info);
-    static bool ParseMonitorRecordText(const QString& text, MonitorRecordInfo* record_info);
-    static bool ParseAlertText(const QString& text, AlertInfo* alert_info);
-    static QString EscapeField(const QString& text);
+    static QString JsonValueToText(const QJsonValue& value);
+    static bool ParsePatientObject(const QJsonObject& object, PatientInfo* patient_info);
+    static bool ParseMonitorRecordObject(const QJsonObject& object, MonitorRecordInfo* record_info);
+    static bool ParseAlertObject(const QJsonObject& object, AlertInfo* alert_info);
 
     static constexpr int kConnectTimeoutMs = 10000;
     static constexpr int kMaxBufferSize = 10 * 1024 * 1024;
@@ -82,5 +85,5 @@ private:
     bool login_pending_ = false;
 };
 
-#endif // BUSINESS_CLIENT_H
+#endif  // BUSINESS_CLIENT_H
 

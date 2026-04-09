@@ -115,6 +115,7 @@ if(BOOST_INCLUDE_DIR)
         business_service
         src/business/business_service_main.cpp
         src/business/business_logic.cpp
+        src/business/business_packet_adapter.cpp
         src/business/file_repository.cpp
         src/business/sha256.cpp
         src/net/io_context_pool.cpp
@@ -205,7 +206,8 @@ if(BUILD_TESTS)
         add_executable(test_business_logic
             tests/test_business_logic.cpp
             src/business/business_logic.cpp
-            src/business/file_repository.cpp
+        src/business/business_packet_adapter.cpp
+        src/business/file_repository.cpp
             src/business/sha256.cpp
             ${SHARED_LOGGER_SOURCES}
         )
@@ -233,3 +235,5 @@ if(BUILD_TESTS)
         endif()
     endif()
 endif()
+
+

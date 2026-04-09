@@ -1,21 +1,68 @@
 ﻿#include "tcpmgr.h"
 
 #include <QAbstractSocket>
-#include <QNetworkProxy>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonValue>
 #include <QLocale>
-#include <QRegularExpression>
+#include <QNetworkProxy>
 
 #include <algorithm>
 
 #include "logger.h"
+#include "protocol_codec.h"
 
 namespace {
 
+QString FormatNumber(double value, int precision = 6) {
+    QString text = QString::number(value, 'f', precision);
+    while (text.contains('.') && (text.endsWith('0') || text.endsWith('.'))) {
+        if (text.endsWith('.')) {
+            text.chop(1);
+            break;
+        }
+        text.chop(1);
+    }
+    if (text.isEmpty()) {
+        text = QStringLiteral("0");
+    }
+    return text;
+}
+
+QString JsonValueToText(const QJsonValue& value) {
+    if (value.isString()) {
+        return value.toString();
+    }
+    if (value.isDouble()) {
+        return FormatNumber(value.toDouble());
+    }
+    if (value.isBool()) {
+        return value.toBool() ? QStringLiteral("true") : QStringLiteral("false");
+    }
+    if (value.isNull() || value.isUndefined()) {
+        return QString();
+    }
+    if (value.isObject()) {
+        return QString::fromUtf8(QJsonDocument(value.toObject()).toJson(QJsonDocument::Compact));
+    }
+    if (value.isArray()) {
+        return QString::fromUtf8(QJsonDocument(value.toArray()).toJson(QJsonDocument::Compact));
+    }
+    return QString();
+}
+
 bool ParseCsvValues(const QString& csv, QVector<double>* values, QString* error_text) {
+    if (values == nullptr) {
+        if (error_text != nullptr) {
+            *error_text = QStringLiteral("内部错误：输出波形数组参数为空");
+        }
+        return false;
+    }
+
     const QStringList tokens = csv.split(',', Qt::SkipEmptyParts);
     if (tokens.isEmpty()) {
         if (error_text != nullptr) {
-            *error_text = QStringLiteral("服务端未返回波形点");
+            *error_text = QStringLiteral("没有可发送的特征值");
         }
         return false;
     }
@@ -26,10 +73,10 @@ bool ParseCsvValues(const QString& csv, QVector<double>* values, QString* error_
 
     for (int i = 0; i < tokens.size(); ++i) {
         bool ok = false;
-        const double value = locale.toDouble(tokens.at(i), &ok);
+        const double value = locale.toDouble(tokens.at(i).trimmed(), &ok);
         if (!ok) {
             if (error_text != nullptr) {
-                *error_text = QStringLiteral("第 %1 个波形点不是合法数字").arg(i + 1);
+                *error_text = QStringLiteral("第 %1 个特征值不是合法数字").arg(i + 1);
             }
             return false;
         }
@@ -44,8 +91,7 @@ bool ParseCsvValues(const QString& csv, QVector<double>* values, QString* error_
 
 TcpMgr::TcpMgr()
     : QObject(nullptr)
-    , _state(ClientState::Disconnected)
-{
+    , _state(ClientState::Disconnected) {
     _socket.setProxy(QNetworkProxy::NoProxy);
 
     connect_timer_.setSingleShot(true);
@@ -121,8 +167,6 @@ TcpMgr::TcpMgr()
             reconnect_timer_.start(delay);
         }
     });
-
-    initHandlers();
 }
 
 TcpMgr::~TcpMgr() = default;
@@ -135,136 +179,120 @@ ClientState TcpMgr::state() const {
     return _state;
 }
 
-void TcpMgr::initHandlers() {
-    _handlers.insert(QStringLiteral("PONG"), [this](const QString&) {
-        emit sig_pong();
-    });
-
-    _handlers.insert(QStringLiteral("BYE"), [this](const QString&) {
-        emitLog(QStringLiteral("服务器: 已确认断开请求"));
-    });
-
-    _handlers.insert(QStringLiteral("ERR"), [this](const QString& line) {
-        const QString error_text = line.mid(3).trimmed();
-        gp::logging::Logger::Instance().WarningText(QString("服务端返回错误: %1").arg(error_text).toUtf8().toStdString());
-        emit sig_server_error(error_text);
-    });
-
-    _handlers.insert(QStringLiteral("OK"), [this](const QString& line) {
-        static const QRegularExpression response_re(
-            R"(^OK\s+pred=(\S+)\s+conf=([-\d\.eE\+]+)\s+alert=(\S+)\s+latency_ms=([-\d\.eE\+]+)$)");
-
-        const QRegularExpressionMatch match = response_re.match(line);
-        if (!match.hasMatch()) {
-            const QString error_text = QStringLiteral("无法解析服务端响应: %1").arg(line);
+void TcpMgr::processBuffer() {
+    while (true) {
+        gp::protocol::Packet packet;
+        QString error_text;
+        const auto status = gp::qt_protocol::TryTakePacket(&_buffer, &packet, &error_text);
+        if (status == gp::qt_protocol::PacketDecodeStatus::kNeedMoreData) {
+            break;
+        }
+        if (status == gp::qt_protocol::PacketDecodeStatus::kError) {
             gp::logging::Logger::Instance().WarningText(error_text.toUtf8().toStdString());
             emit sig_protocol_error(error_text);
+            _buffer.clear();
+            _socket.abort();
             return;
         }
+        handlePacket(packet);
+    }
+}
 
+void TcpMgr::handlePacket(const gp::protocol::Packet& packet) {
+    QJsonObject payload;
+    QString error_text;
+    if (!gp::qt_protocol::ParseJsonObject(packet, &payload, &error_text)) {
+        gp::logging::Logger::Instance().WarningText(error_text.toUtf8().toStdString());
+        emit sig_protocol_error(error_text);
+        return;
+    }
+
+    emitLog(QString("服务器 << %1").arg(gp::qt_protocol::MessageTypeToText(packet.message_type)));
+
+    switch (packet.message_type) {
+    case gp::protocol::MessageType::kPingResponse:
+        emit sig_pong();
+        return;
+
+    case gp::protocol::MessageType::kByeResponse:
+        emitLog(QStringLiteral("服务器: 已确认断开请求"));
+        return;
+
+    case gp::protocol::MessageType::kErrorResponse: {
+        const QString message = JsonValueToText(payload.value(QStringLiteral("message"))).trimmed();
+        const QString code = JsonValueToText(payload.value(QStringLiteral("code"))).trimmed();
+        const QString final_text = code.isEmpty() ? message : QStringLiteral("%1: %2").arg(code, message);
+        gp::logging::Logger::Instance().WarningText(final_text.toUtf8().toStdString());
+        emit sig_server_error(final_text);
+        return;
+    }
+
+    case gp::protocol::MessageType::kPredictResponse: {
         PredictResult result;
-        result.pred_label = match.captured(1);
-        result.confidence = match.captured(2);
-        result.alert_level = match.captured(3);
-        result.latency_ms = match.captured(4);
+        result.pred_label = JsonValueToText(payload.value(QStringLiteral("pred_label")));
+        result.confidence = JsonValueToText(payload.value(QStringLiteral("confidence")));
+        result.alert_level = JsonValueToText(payload.value(QStringLiteral("alert_level")));
+        result.latency_ms = JsonValueToText(payload.value(QStringLiteral("latency_ms")));
         emit sig_predict_result(result);
-    });
+        return;
+    }
 
-    _handlers.insert(QStringLiteral("SAMPLES"), [this](const QString& line) {
-        const QString payload = line.mid(QStringLiteral("SAMPLES").size()).trimmed();
+    case gp::protocol::MessageType::kListSamplesResponse: {
         QStringList samples;
-        if (!payload.isEmpty()) {
-            samples = payload.split(',', Qt::SkipEmptyParts);
-            for (QString& sample : samples) {
-                sample = sample.trimmed();
+        const QJsonArray sample_array = payload.value(QStringLiteral("samples")).toArray();
+        for (const QJsonValue& value : sample_array) {
+            const QString sample_name = JsonValueToText(value).trimmed();
+            if (!sample_name.isEmpty()) {
+                samples.push_back(sample_name);
             }
-            samples.removeAll(QString());
         }
         emit sig_sample_list_ready(samples);
-    });
+        return;
+    }
 
-    _handlers.insert(QStringLiteral("BEAT"), [this](const QString& line) {
-        static const QRegularExpression response_re(
-            R"(^BEAT\s+name=(\S+)\s+true=(\S+)\s+pred=(\S+)\s+conf=([-\d\.eE\+]+)\s+alert=(\S+)\s+latency_ms=([-\d\.eE\+]+)\s+values=(.+)$)");
-
-        const QRegularExpressionMatch match = response_re.match(line);
-        if (!match.hasMatch()) {
-            const QString error_text = QStringLiteral("无法解析单拍响应: %1").arg(line.left(120));
-            gp::logging::Logger::Instance().WarningText(error_text.toUtf8().toStdString());
-            emit sig_protocol_error(error_text);
-            return;
-        }
-
+    case gp::protocol::MessageType::kPlaySampleResponse: {
         BeatResponse response;
-        response.sample_name = match.captured(1);
-        response.true_label = match.captured(2);
-        response.pred_label = match.captured(3);
-        response.confidence = match.captured(4);
-        response.alert_level = match.captured(5);
-        response.latency_ms = match.captured(6);
+        response.sample_name = JsonValueToText(payload.value(QStringLiteral("sample_name")));
+        response.true_label = JsonValueToText(payload.value(QStringLiteral("true_label")));
+        response.pred_label = JsonValueToText(payload.value(QStringLiteral("pred_label")));
+        response.confidence = JsonValueToText(payload.value(QStringLiteral("confidence")));
+        response.alert_level = JsonValueToText(payload.value(QStringLiteral("alert_level")));
+        response.latency_ms = JsonValueToText(payload.value(QStringLiteral("latency_ms")));
 
-        QString error_text;
-        if (!ParseCsvValues(match.captured(7), &response.values, &error_text)) {
-            gp::logging::Logger::Instance().WarningText(error_text.toUtf8().toStdString());
-            emit sig_protocol_error(error_text);
-            return;
+        const QJsonArray values = payload.value(QStringLiteral("values")).toArray();
+        response.values.reserve(values.size());
+        for (const QJsonValue& value : values) {
+            if (value.isDouble()) {
+                response.values.push_back(value.toDouble());
+                continue;
+            }
+
+            bool ok = false;
+            const double numeric_value = QLocale::c().toDouble(JsonValueToText(value), &ok);
+            if (!ok) {
+                const QString text = QStringLiteral("播放样本响应中的波形点不是合法数字");
+                gp::logging::Logger::Instance().WarningText(text.toUtf8().toStdString());
+                emit sig_protocol_error(text);
+                return;
+            }
+            response.values.push_back(numeric_value);
         }
 
         emit sig_beat_response(response);
-    });
-}
-
-void TcpMgr::processBuffer() {
-    int consumed = 0;
-    while (true) {
-        const int newline_index = _buffer.indexOf('\n', consumed);
-        if (newline_index < 0) {
-            break;
-        }
-
-        QByteArray line = _buffer.mid(consumed, newline_index - consumed);
-        consumed = newline_index + 1;
-        if (!line.isEmpty() && line.endsWith('\r')) {
-            line.chop(1);
-        }
-
-        handleLine(QString::fromUtf8(line));
-    }
-    if (consumed > 0) {
-        _buffer.remove(0, consumed);
-    }
-}
-
-void TcpMgr::handleLine(const QString& line) {
-    const QString trimmed = line.trimmed();
-    if (trimmed.isEmpty()) {
-        const QString error_text = QStringLiteral("收到空响应");
-        gp::logging::Logger::Instance().WarningText(error_text.toUtf8().toStdString());
-        emit sig_protocol_error(error_text);
         return;
     }
 
-    const QString key = trimmed.section(' ', 0, 0).toUpper();
-    if (key == QStringLiteral("BEAT")) {
-        emitLog(QStringLiteral("服务器 << BEAT [单拍波形与推理结果]"));
-    } else if (key == QStringLiteral("SAMPLES")) {
-        emitLog(QStringLiteral("服务器 << SAMPLES [样本列表]"));
-    } else {
-        emitLog(QString("服务器 << %1").arg(trimmed));
-    }
-
-    const auto iter = _handlers.find(key);
-    if (iter == _handlers.end()) {
-        const QString error_text = QStringLiteral("未注册的响应类型: %1").arg(trimmed);
-        gp::logging::Logger::Instance().WarningText(error_text.toUtf8().toStdString());
-        emit sig_protocol_error(error_text);
+    default: {
+        const QString text = QStringLiteral("未注册的推理响应类型: %1")
+                                 .arg(gp::qt_protocol::MessageTypeToText(packet.message_type));
+        gp::logging::Logger::Instance().WarningText(text.toUtf8().toStdString());
+        emit sig_protocol_error(text);
         return;
     }
-
-    iter.value()(trimmed);
+    }
 }
 
-void TcpMgr::sendLine(const QString& line) {
+void TcpMgr::sendPacket(gp::protocol::MessageType type, const QJsonObject& payload) {
     if (_state != ClientState::Connected) {
         const QString error_text = QStringLiteral("当前未连接服务器");
         gp::logging::Logger::Instance().WarningText(error_text.toUtf8().toStdString());
@@ -272,8 +300,8 @@ void TcpMgr::sendLine(const QString& line) {
         return;
     }
 
-    _socket.write(line.toUtf8());
-    _socket.write("\n");
+    const QByteArray bytes = gp::qt_protocol::EncodeJsonPacket(type, payload);
+    _socket.write(bytes);
 }
 
 void TcpMgr::emitLog(const QString& text) {
@@ -314,9 +342,10 @@ void TcpMgr::slot_disconnect() {
     connect_timer_.stop();
 
     if (_state == ClientState::Connected) {
-        _socket.write("QUIT\n");
+        const QByteArray bytes = gp::qt_protocol::EncodeJsonPacket(gp::protocol::MessageType::kQuitRequest);
+        _socket.write(bytes);
         _socket.flush();
-        emitLog(QStringLiteral("客户端 >> QUIT"));
+        emitLog(QStringLiteral("客户端 >> QuitRequest"));
     }
 
     _socket.disconnectFromHost();
@@ -333,8 +362,8 @@ void TcpMgr::slot_send_ping() {
         return;
     }
 
-    sendLine(QStringLiteral("PING"));
-    emitLog(QStringLiteral("客户端 >> PING"));
+    sendPacket(gp::protocol::MessageType::kPingRequest);
+    emitLog(QStringLiteral("客户端 >> PingRequest"));
 }
 
 void TcpMgr::slot_send_predict(const QString& payload) {
@@ -345,8 +374,23 @@ void TcpMgr::slot_send_predict(const QString& payload) {
         return;
     }
 
-    sendLine(QString("PREDICT %1").arg(payload));
-    emitLog(QStringLiteral("客户端 >> PREDICT [187 维特征]"));
+    QVector<double> values;
+    QString error_text;
+    if (!ParseCsvValues(payload, &values, &error_text)) {
+        gp::logging::Logger::Instance().WarningText(error_text.toUtf8().toStdString());
+        emit sig_server_error(error_text);
+        return;
+    }
+
+    QJsonArray features;
+    for (double value : values) {
+        features.append(value);
+    }
+
+    QJsonObject request;
+    request.insert(QStringLiteral("features"), features);
+    sendPacket(gp::protocol::MessageType::kPredictRequest, request);
+    emitLog(QStringLiteral("客户端 >> PredictRequest [187 维特征]"));
 }
 
 void TcpMgr::slot_list_samples() {
@@ -357,8 +401,8 @@ void TcpMgr::slot_list_samples() {
         return;
     }
 
-    sendLine(QStringLiteral("LIST_SAMPLES"));
-    emitLog(QStringLiteral("客户端 >> LIST_SAMPLES"));
+    sendPacket(gp::protocol::MessageType::kListSamplesRequest);
+    emitLog(QStringLiteral("客户端 >> ListSamplesRequest"));
 }
 
 void TcpMgr::slot_play_sample(const QString& sample_name) {
@@ -369,14 +413,17 @@ void TcpMgr::slot_play_sample(const QString& sample_name) {
         return;
     }
 
-    if (sample_name.trimmed().isEmpty()) {
+    const QString trimmed_name = sample_name.trimmed();
+    if (trimmed_name.isEmpty()) {
         const QString error_text = QStringLiteral("样本名不能为空");
         gp::logging::Logger::Instance().WarningText(error_text.toUtf8().toStdString());
         emit sig_server_error(error_text);
         return;
     }
 
-    sendLine(QString("PLAY_SAMPLE %1").arg(sample_name.trimmed()));
-    emitLog(QString("客户端 >> PLAY_SAMPLE %1").arg(sample_name.trimmed()));
+    QJsonObject request;
+    request.insert(QStringLiteral("sample_name"), trimmed_name);
+    sendPacket(gp::protocol::MessageType::kPlaySampleRequest, request);
+    emitLog(QString("客户端 >> PlaySampleRequest %1").arg(trimmed_name));
 }
 

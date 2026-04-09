@@ -19,6 +19,8 @@ qt_add_executable(graduation_project_widget
     main.cpp
     business_client.cpp
     business_client.h
+    protocol_codec.cpp
+    protocol_codec.h
     tcpmgr.cpp
     tcpmgr.h
     global.h
@@ -109,3 +111,4 @@ install(TARGETS graduation_project_widget
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
+

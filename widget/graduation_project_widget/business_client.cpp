@@ -1,11 +1,66 @@
 ﻿#include "business_client.h"
 
 #include <QAbstractSocket>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonValue>
 #include <QNetworkProxy>
-#include <QRegularExpression>
-#include <QStringList>
 
 #include "logger.h"
+#include "protocol_codec.h"
+
+namespace {
+
+QString FormatNumber(double value, int precision = 6) {
+    QString text = QString::number(value, 'f', precision);
+    while (text.contains('.') && (text.endsWith('0') || text.endsWith('.'))) {
+        if (text.endsWith('.')) {
+            text.chop(1);
+            break;
+        }
+        text.chop(1);
+    }
+    if (text.isEmpty()) {
+        text = QStringLiteral("0");
+    }
+    return text;
+}
+
+QString JsonValueToTextLocal(const QJsonValue& value) {
+    if (value.isString()) {
+        return value.toString();
+    }
+    if (value.isDouble()) {
+        return FormatNumber(value.toDouble());
+    }
+    if (value.isBool()) {
+        return value.toBool() ? QStringLiteral("true") : QStringLiteral("false");
+    }
+    if (value.isNull() || value.isUndefined()) {
+        return QString();
+    }
+    if (value.isObject()) {
+        return QString::fromUtf8(QJsonDocument(value.toObject()).toJson(QJsonDocument::Compact));
+    }
+    if (value.isArray()) {
+        return QString::fromUtf8(QJsonDocument(value.toArray()).toJson(QJsonDocument::Compact));
+    }
+    return QString();
+}
+
+QString BuildErrorText(const QJsonObject& payload) {
+    const QString code = JsonValueToTextLocal(payload.value(QStringLiteral("code"))).trimmed();
+    const QString message = JsonValueToTextLocal(payload.value(QStringLiteral("message"))).trimmed();
+    if (code.isEmpty()) {
+        return message;
+    }
+    if (message.isEmpty()) {
+        return code;
+    }
+    return QStringLiteral("%1: %2").arg(code, message);
+}
+
+}  // namespace
 
 BusinessClient::BusinessClient(QObject* parent)
     : QObject(parent) {
@@ -20,7 +75,7 @@ BusinessClient::BusinessClient(QObject* parent)
             pending_password_.clear();
             state_ = ClientState::Disconnected;
             emit sig_state_changed(state_);
-            emit sig_login_failed(QStringLiteral("连接超时，请检查服务器地址和端口"));
+            emit sig_login_failed(QStringLiteral("连接超时，请检查服务端地址和端口"));
         }
     });
 
@@ -34,9 +89,11 @@ BusinessClient::BusinessClient(QObject* parent)
             return;
         }
 
-        const QString login_line = QString("LOGIN %1 %2").arg(pending_username_, pending_password_);
-        SendLine(login_line);
-        EmitLog(QStringLiteral("客户端 >> LOGIN [账号认证]"));
+        QJsonObject request;
+        request.insert(QStringLiteral("username"), pending_username_);
+        request.insert(QStringLiteral("password"), pending_password_);
+        SendPacket(gp::protocol::MessageType::kLoginRequest, request);
+        EmitLog(QStringLiteral("客户端 >> LoginRequest [账号认证]"));
     });
 
     QObject::connect(&socket_, &QTcpSocket::readyRead, this, [this]() {
@@ -75,12 +132,18 @@ BusinessClient::BusinessClient(QObject* parent)
     QObject::connect(&socket_, &QTcpSocket::disconnected, this, [this]() {
         connect_timer_.stop();
         buffer_.clear();
+
+        const bool was_login_pending = login_pending_;
         login_pending_ = false;
         pending_password_.clear();
         state_ = ClientState::Disconnected;
         emit sig_state_changed(state_);
         EmitLog(QStringLiteral("业务服务端: 连接已断开"));
         emit sig_connection_closed();
+
+        if (was_login_pending) {
+            emit sig_login_failed(QStringLiteral("登录过程中连接已断开"));
+        }
     });
 }
 
@@ -130,9 +193,12 @@ void BusinessClient::slot_disconnect() {
     }
 
     login_pending_ = false;
-    if (socket_.state() == QAbstractSocket::ConnectedState) {
-        socket_.write("QUIT\n");
+    pending_password_.clear();
+    if (state_ == ClientState::Connected && socket_.state() == QAbstractSocket::ConnectedState) {
+        const QByteArray bytes = gp::qt_protocol::EncodeJsonPacket(gp::protocol::MessageType::kQuitRequest);
+        socket_.write(bytes);
         socket_.flush();
+        EmitLog(QStringLiteral("客户端 >> QuitRequest"));
     }
     socket_.disconnectFromHost();
 }
@@ -142,8 +208,8 @@ void BusinessClient::slot_list_patients() {
         return;
     }
 
-    SendLine(QStringLiteral("LIST_PATIENTS"));
-    EmitLog(QStringLiteral("客户端 >> LIST_PATIENTS"));
+    SendPacket(gp::protocol::MessageType::kListPatientsRequest);
+    EmitLog(QStringLiteral("客户端 >> ListPatientsRequest"));
 }
 
 void BusinessClient::slot_get_patient(const QString& patient_id) {
@@ -157,8 +223,10 @@ void BusinessClient::slot_get_patient(const QString& patient_id) {
         return;
     }
 
-    SendLine(QString("GET_PATIENT %1").arg(trimmed_id));
-    EmitLog(QString("客户端 >> GET_PATIENT %1").arg(trimmed_id));
+    QJsonObject request;
+    request.insert(QStringLiteral("patient_id"), trimmed_id);
+    SendPacket(gp::protocol::MessageType::kGetPatientRequest, request);
+    EmitLog(QString("客户端 >> GetPatientRequest %1").arg(trimmed_id));
 }
 
 void BusinessClient::slot_add_patient(const PatientInfo& patient_info) {
@@ -171,15 +239,15 @@ void BusinessClient::slot_add_patient(const PatientInfo& patient_info) {
         return;
     }
 
-    const QString payload = QString("%1|%2|%3|%4|%5|%6")
-                                .arg(EscapeField(patient_info.patient_id))
-                                .arg(EscapeField(patient_info.name))
-                                .arg(EscapeField(patient_info.gender))
-                                .arg(patient_info.age)
-                                .arg(EscapeField(patient_info.phone))
-                                .arg(EscapeField(patient_info.remark));
-    SendLine(QString("ADD_PATIENT %1").arg(payload));
-    EmitLog(QString("客户端 >> ADD_PATIENT %1").arg(patient_info.patient_id.trimmed()));
+    QJsonObject request;
+    request.insert(QStringLiteral("patient_id"), patient_info.patient_id.trimmed());
+    request.insert(QStringLiteral("name"), patient_info.name.trimmed());
+    request.insert(QStringLiteral("gender"), patient_info.gender.trimmed());
+    request.insert(QStringLiteral("age"), patient_info.age);
+    request.insert(QStringLiteral("phone"), patient_info.phone.trimmed());
+    request.insert(QStringLiteral("remark"), patient_info.remark.trimmed());
+    SendPacket(gp::protocol::MessageType::kAddPatientRequest, request);
+    EmitLog(QString("客户端 >> AddPatientRequest %1").arg(patient_info.patient_id.trimmed()));
 }
 
 void BusinessClient::slot_update_patient(const PatientInfo& patient_info) {
@@ -192,15 +260,15 @@ void BusinessClient::slot_update_patient(const PatientInfo& patient_info) {
         return;
     }
 
-    const QString payload = QString("%1|%2|%3|%4|%5|%6")
-                                .arg(EscapeField(patient_info.patient_id))
-                                .arg(EscapeField(patient_info.name))
-                                .arg(EscapeField(patient_info.gender))
-                                .arg(patient_info.age)
-                                .arg(EscapeField(patient_info.phone))
-                                .arg(EscapeField(patient_info.remark));
-    SendLine(QString("UPDATE_PATIENT %1").arg(payload));
-    EmitLog(QString("客户端 >> UPDATE_PATIENT %1").arg(patient_info.patient_id.trimmed()));
+    QJsonObject request;
+    request.insert(QStringLiteral("patient_id"), patient_info.patient_id.trimmed());
+    request.insert(QStringLiteral("name"), patient_info.name.trimmed());
+    request.insert(QStringLiteral("gender"), patient_info.gender.trimmed());
+    request.insert(QStringLiteral("age"), patient_info.age);
+    request.insert(QStringLiteral("phone"), patient_info.phone.trimmed());
+    request.insert(QStringLiteral("remark"), patient_info.remark.trimmed());
+    SendPacket(gp::protocol::MessageType::kUpdatePatientRequest, request);
+    EmitLog(QString("客户端 >> UpdatePatientRequest %1").arg(patient_info.patient_id.trimmed()));
 }
 
 void BusinessClient::slot_delete_patient(const QString& patient_id) {
@@ -214,8 +282,10 @@ void BusinessClient::slot_delete_patient(const QString& patient_id) {
         return;
     }
 
-    SendLine(QString("DELETE_PATIENT %1").arg(trimmed_id));
-    EmitLog(QString("客户端 >> DELETE_PATIENT %1").arg(trimmed_id));
+    QJsonObject request;
+    request.insert(QStringLiteral("patient_id"), trimmed_id);
+    SendPacket(gp::protocol::MessageType::kDeletePatientRequest, request);
+    EmitLog(QString("客户端 >> DeletePatientRequest %1").arg(trimmed_id));
 }
 
 void BusinessClient::slot_add_monitor_record(const MonitorRecordInfo& record_info) {
@@ -228,17 +298,17 @@ void BusinessClient::slot_add_monitor_record(const MonitorRecordInfo& record_inf
         return;
     }
 
-    const QString payload = QString("%1|%2|%3|%4|%5|%6|%7|%8")
-                                .arg(EscapeField(record_info.patient_id))
-                                .arg(EscapeField(record_info.pred_label))
-                                .arg(EscapeField(record_info.confidence))
-                                .arg(EscapeField(record_info.alert_level))
-                                .arg(EscapeField(record_info.latency_ms))
-                                .arg(EscapeField(record_info.source))
-                                .arg(EscapeField(record_info.sample_name))
-                                .arg(EscapeField(record_info.true_label));
-    SendLine(QString("ADD_MONITOR_RECORD %1").arg(payload));
-    EmitLog(QString("客户端 >> ADD_MONITOR_RECORD %1 [%2]")
+    QJsonObject request;
+    request.insert(QStringLiteral("patient_id"), record_info.patient_id.trimmed());
+    request.insert(QStringLiteral("pred_label"), record_info.pred_label.trimmed());
+    request.insert(QStringLiteral("confidence"), record_info.confidence.trimmed());
+    request.insert(QStringLiteral("alert_level"), record_info.alert_level.trimmed());
+    request.insert(QStringLiteral("latency_ms"), record_info.latency_ms.trimmed());
+    request.insert(QStringLiteral("source"), record_info.source.trimmed());
+    request.insert(QStringLiteral("sample_name"), record_info.sample_name.trimmed());
+    request.insert(QStringLiteral("true_label"), record_info.true_label.trimmed());
+    SendPacket(gp::protocol::MessageType::kAddMonitorRecordRequest, request);
+    EmitLog(QString("客户端 >> AddMonitorRecordRequest %1 [%2]")
                 .arg(record_info.patient_id, record_info.alert_level));
 }
 
@@ -253,8 +323,10 @@ void BusinessClient::slot_list_monitor_records(const QString& patient_id) {
         return;
     }
 
-    SendLine(QString("LIST_MONITOR_RECORDS %1").arg(trimmed_id));
-    EmitLog(QString("客户端 >> LIST_MONITOR_RECORDS %1").arg(trimmed_id));
+    QJsonObject request;
+    request.insert(QStringLiteral("patient_id"), trimmed_id);
+    SendPacket(gp::protocol::MessageType::kListMonitorRecordsRequest, request);
+    EmitLog(QString("客户端 >> ListMonitorRecordsRequest %1").arg(trimmed_id));
 }
 
 void BusinessClient::slot_list_all_monitor_records() {
@@ -262,8 +334,8 @@ void BusinessClient::slot_list_all_monitor_records() {
         return;
     }
 
-    SendLine(QStringLiteral("LIST_ALL_MONITOR_RECORDS"));
-    EmitLog(QStringLiteral("客户端 >> LIST_ALL_MONITOR_RECORDS"));
+    SendPacket(gp::protocol::MessageType::kListAllMonitorRecordsRequest);
+    EmitLog(QStringLiteral("客户端 >> ListAllMonitorRecordsRequest"));
 }
 
 void BusinessClient::slot_list_alerts(const QString& patient_id) {
@@ -277,8 +349,10 @@ void BusinessClient::slot_list_alerts(const QString& patient_id) {
         return;
     }
 
-    SendLine(QString("LIST_ALERTS %1").arg(trimmed_id));
-    EmitLog(QString("客户端 >> LIST_ALERTS %1").arg(trimmed_id));
+    QJsonObject request;
+    request.insert(QStringLiteral("patient_id"), trimmed_id);
+    SendPacket(gp::protocol::MessageType::kListAlertsRequest, request);
+    EmitLog(QString("客户端 >> ListAlertsRequest %1").arg(trimmed_id));
 }
 
 void BusinessClient::slot_list_all_alerts() {
@@ -286,8 +360,8 @@ void BusinessClient::slot_list_all_alerts() {
         return;
     }
 
-    SendLine(QStringLiteral("LIST_ALL_ALERTS"));
-    EmitLog(QStringLiteral("客户端 >> LIST_ALL_ALERTS"));
+    SendPacket(gp::protocol::MessageType::kListAllAlertsRequest);
+    EmitLog(QStringLiteral("客户端 >> ListAllAlertsRequest"));
 }
 
 void BusinessClient::slot_confirm_alert(const QString& alert_id, const QString& confirmed_by) {
@@ -306,8 +380,11 @@ void BusinessClient::slot_confirm_alert(const QString& alert_id, const QString& 
         return;
     }
 
-    SendLine(QString("CONFIRM_ALERT %1|%2").arg(EscapeField(trimmed_id), EscapeField(trimmed_by)));
-    EmitLog(QString("客户端 >> CONFIRM_ALERT %1 [%2]").arg(trimmed_id, trimmed_by));
+    QJsonObject request;
+    request.insert(QStringLiteral("alert_id"), trimmed_id);
+    request.insert(QStringLiteral("confirmed_by"), trimmed_by);
+    SendPacket(gp::protocol::MessageType::kConfirmAlertRequest, request);
+    EmitLog(QString("客户端 >> ConfirmAlertRequest %1 [%2]").arg(trimmed_id, trimmed_by));
 }
 
 void BusinessClient::slot_change_password(const QString& username, const QString& old_pw, const QString& new_pw) {
@@ -315,81 +392,102 @@ void BusinessClient::slot_change_password(const QString& username, const QString
         return;
     }
 
-    SendLine(QString("CHANGE_PASSWORD %1|%2|%3")
-                 .arg(EscapeField(username), EscapeField(old_pw), EscapeField(new_pw)));
-    EmitLog(QStringLiteral("客户端 >> CHANGE_PASSWORD"));
+    QJsonObject request;
+    request.insert(QStringLiteral("username"), username.trimmed());
+    request.insert(QStringLiteral("old_password"), old_pw);
+    request.insert(QStringLiteral("new_password"), new_pw);
+    SendPacket(gp::protocol::MessageType::kChangePasswordRequest, request);
+    EmitLog(QStringLiteral("客户端 >> ChangePasswordRequest"));
 }
 
 void BusinessClient::ProcessBuffer() {
-    int consumed = 0;
     while (true) {
-        const int newline_index = buffer_.indexOf('\n', consumed);
-        if (newline_index < 0) {
+        gp::protocol::Packet packet;
+        QString error_text;
+        const auto status = gp::qt_protocol::TryTakePacket(&buffer_, &packet, &error_text);
+        if (status == gp::qt_protocol::PacketDecodeStatus::kNeedMoreData) {
             break;
         }
-
-        QByteArray line = buffer_.mid(consumed, newline_index - consumed);
-        consumed = newline_index + 1;
-        if (!line.isEmpty() && line.endsWith('\r')) {
-            line.chop(1);
+        if (status == gp::qt_protocol::PacketDecodeStatus::kError) {
+            gp::logging::Logger::Instance().WarningText(error_text.toUtf8().toStdString());
+            emit sig_business_error(error_text);
+            buffer_.clear();
+            socket_.abort();
+            return;
         }
-        HandleLine(QString::fromUtf8(line));
-    }
-    if (consumed > 0) {
-        buffer_.remove(0, consumed);
+        HandlePacket(packet);
     }
 }
 
-void BusinessClient::HandleLine(const QString& line) {
-    const QString trimmed = line.trimmed();
-    if (trimmed.isEmpty()) {
+void BusinessClient::HandlePacket(const gp::protocol::Packet& packet) {
+    QJsonObject payload;
+    QString error_text;
+    if (!gp::qt_protocol::ParseJsonObject(packet, &payload, &error_text)) {
+        emit sig_business_error(error_text);
         return;
     }
 
-    EmitLog(QString("业务服务端 << %1").arg(trimmed));
+    EmitLog(QString("业务服务端 << %1").arg(gp::qt_protocol::MessageTypeToText(packet.message_type)));
 
-    if (trimmed.startsWith(QStringLiteral("LOGIN_OK"))) {
-        static const QRegularExpression kLoginOkRe(
-            R"(^LOGIN_OK\s+role=(\S+)\s+display_name=(.+)$)");
-        const QRegularExpressionMatch match = kLoginOkRe.match(trimmed);
-        if (!match.hasMatch()) {
+    switch (packet.message_type) {
+    case gp::protocol::MessageType::kByeResponse:
+        return;
+
+    case gp::protocol::MessageType::kErrorResponse: {
+        const QString text = BuildErrorText(payload);
+        gp::logging::Logger::Instance().WarningText(
+            QString("业务服务端返回错误: %1").arg(text).toUtf8().toStdString());
+
+        if (login_pending_) {
+            login_pending_ = false;
             pending_password_.clear();
-            emit sig_login_failed(QStringLiteral("无法解析登录响应"));
+            emit sig_login_failed(text);
+            socket_.disconnectFromHost();
             return;
         }
 
+        emit sig_business_error(text);
+        return;
+    }
+
+    case gp::protocol::MessageType::kLoginResponse: {
         login_pending_ = false;
         pending_password_.clear();
         state_ = ClientState::Connected;
         emit sig_state_changed(state_);
 
         LoginUserInfo user_info;
-        user_info.username = pending_username_;
-        user_info.role = match.captured(1);
-        user_info.display_name = match.captured(2).trimmed();
+        user_info.username = JsonValueToText(payload.value(QStringLiteral("username")));
+        if (user_info.username.isEmpty()) {
+            user_info.username = pending_username_;
+        }
+        user_info.role = JsonValueToText(payload.value(QStringLiteral("role")));
+        user_info.display_name = JsonValueToText(payload.value(QStringLiteral("display_name")));
         emit sig_login_success(user_info);
         return;
     }
 
-    if (trimmed.startsWith(QStringLiteral("PATIENTS"))) {
+    case gp::protocol::MessageType::kListPatientsResponse: {
         QVector<PatientInfo> patients;
-        const QString payload = trimmed.mid(QStringLiteral("PATIENTS").size()).trimmed();
-        if (!payload.isEmpty()) {
-            const QStringList patient_texts = payload.split(';', Qt::SkipEmptyParts);
-            for (const QString& patient_text : patient_texts) {
-                PatientInfo patient_info;
-                if (ParsePatientText(patient_text, &patient_info)) {
-                    patients.push_back(patient_info);
-                }
+        const QJsonArray patient_array = payload.value(QStringLiteral("patients")).toArray();
+        patients.reserve(patient_array.size());
+        for (const QJsonValue& value : patient_array) {
+            if (!value.isObject()) {
+                continue;
+            }
+            PatientInfo patient_info;
+            if (ParsePatientObject(value.toObject(), &patient_info)) {
+                patients.push_back(patient_info);
             }
         }
         emit sig_patient_list_ready(patients);
         return;
     }
 
-    if (trimmed.startsWith(QStringLiteral("PATIENT "))) {
+    case gp::protocol::MessageType::kGetPatientResponse: {
+        const QJsonObject patient_object = payload.value(QStringLiteral("patient")).toObject();
         PatientInfo patient_info;
-        if (!ParsePatientText(trimmed.mid(QStringLiteral("PATIENT ").size()), &patient_info)) {
+        if (!ParsePatientObject(patient_object, &patient_info)) {
             emit sig_business_error(QStringLiteral("无法解析病人详情响应"));
             return;
         }
@@ -397,110 +495,79 @@ void BusinessClient::HandleLine(const QString& line) {
         return;
     }
 
-    if (trimmed.startsWith(QStringLiteral("ALL_MONITOR_RECORDS"))) {
+    case gp::protocol::MessageType::kAddPatientResponse:
+    case gp::protocol::MessageType::kUpdatePatientResponse:
+    case gp::protocol::MessageType::kDeletePatientResponse:
+        emit sig_patient_operation_success(JsonValueToText(payload.value(QStringLiteral("message"))).trimmed());
+        return;
+
+    case gp::protocol::MessageType::kAddMonitorRecordResponse:
+        emit sig_monitor_record_saved(JsonValueToText(payload.value(QStringLiteral("message"))).trimmed());
+        return;
+
+    case gp::protocol::MessageType::kListMonitorRecordsResponse:
+    case gp::protocol::MessageType::kListAllMonitorRecordsResponse: {
         QVector<MonitorRecordInfo> records;
-        const QString payload = trimmed.mid(QStringLiteral("ALL_MONITOR_RECORDS").size()).trimmed();
-        if (!payload.isEmpty()) {
-            const QStringList record_texts = payload.split(';', Qt::SkipEmptyParts);
-            for (const QString& record_text : record_texts) {
-                MonitorRecordInfo record_info;
-                if (ParseMonitorRecordText(record_text, &record_info)) {
-                    records.push_back(record_info);
-                }
+        const QJsonArray record_array = payload.value(QStringLiteral("records")).toArray();
+        records.reserve(record_array.size());
+        for (const QJsonValue& value : record_array) {
+            if (!value.isObject()) {
+                continue;
+            }
+            MonitorRecordInfo record_info;
+            if (ParseMonitorRecordObject(value.toObject(), &record_info)) {
+                records.push_back(record_info);
             }
         }
-        emit sig_all_monitor_records_ready(records);
+        if (packet.message_type == gp::protocol::MessageType::kListMonitorRecordsResponse) {
+            emit sig_monitor_records_ready(records);
+        } else {
+            emit sig_all_monitor_records_ready(records);
+        }
         return;
     }
 
-    if (trimmed.startsWith(QStringLiteral("MONITOR_RECORDS"))) {
-        QVector<MonitorRecordInfo> records;
-        const QString payload = trimmed.mid(QStringLiteral("MONITOR_RECORDS").size()).trimmed();
-        if (!payload.isEmpty()) {
-            const QStringList record_texts = payload.split(';', Qt::SkipEmptyParts);
-            for (const QString& record_text : record_texts) {
-                MonitorRecordInfo record_info;
-                if (ParseMonitorRecordText(record_text, &record_info)) {
-                    records.push_back(record_info);
-                }
-            }
-        }
-        emit sig_monitor_records_ready(records);
-        return;
-    }
-
-    if (trimmed.startsWith(QStringLiteral("ALERTS"))) {
+    case gp::protocol::MessageType::kListAlertsResponse:
+    case gp::protocol::MessageType::kListAllAlertsResponse: {
         QVector<AlertInfo> alerts;
-        const QString payload = trimmed.mid(QStringLiteral("ALERTS").size()).trimmed();
-        if (!payload.isEmpty()) {
-            const QStringList alert_texts = payload.split(';', Qt::SkipEmptyParts);
-            for (const QString& alert_text : alert_texts) {
-                AlertInfo alert_info;
-                if (ParseAlertText(alert_text, &alert_info)) {
-                    alerts.push_back(alert_info);
-                }
+        const QJsonArray alert_array = payload.value(QStringLiteral("alerts")).toArray();
+        alerts.reserve(alert_array.size());
+        for (const QJsonValue& value : alert_array) {
+            if (!value.isObject()) {
+                continue;
+            }
+            AlertInfo alert_info;
+            if (ParseAlertObject(value.toObject(), &alert_info)) {
+                alerts.push_back(alert_info);
             }
         }
-        emit sig_alerts_ready(alerts);
-        return;
-    }
-
-    if (trimmed.startsWith(QStringLiteral("ALL_ALERTS"))) {
-        QVector<AlertInfo> alerts;
-        const QString payload = trimmed.mid(QStringLiteral("ALL_ALERTS").size()).trimmed();
-        if (!payload.isEmpty()) {
-            const QStringList alert_texts = payload.split(';', Qt::SkipEmptyParts);
-            for (const QString& alert_text : alert_texts) {
-                AlertInfo alert_info;
-                if (ParseAlertText(alert_text, &alert_info)) {
-                    alerts.push_back(alert_info);
-                }
-            }
+        if (packet.message_type == gp::protocol::MessageType::kListAlertsResponse) {
+            emit sig_alerts_ready(alerts);
+        } else {
+            emit sig_all_alerts_ready(alerts);
         }
-        emit sig_all_alerts_ready(alerts);
         return;
     }
 
-    if (trimmed.startsWith(QStringLiteral("RECORD_OK"))) {
-        emit sig_monitor_record_saved(trimmed.mid(QStringLiteral("RECORD_OK").size()).trimmed());
+    case gp::protocol::MessageType::kConfirmAlertResponse:
+        emit sig_alert_confirmed(JsonValueToText(payload.value(QStringLiteral("message"))).trimmed());
         return;
-    }
 
-    if (trimmed.startsWith(QStringLiteral("ALERT_OK"))) {
-        emit sig_alert_confirmed(trimmed.mid(QStringLiteral("ALERT_OK").size()).trimmed());
+    case gp::protocol::MessageType::kChangePasswordResponse:
+        emit sig_password_changed(JsonValueToText(payload.value(QStringLiteral("message"))).trimmed());
         return;
-    }
 
-    if (trimmed.startsWith(QStringLiteral("PASSWORD_OK"))) {
-        emit sig_password_changed(trimmed.mid(QStringLiteral("PASSWORD_OK").size()).trimmed());
+    default:
+        emit sig_business_error(
+            QStringLiteral("未注册的业务响应类型: %1")
+                .arg(gp::qt_protocol::MessageTypeToText(packet.message_type)));
         return;
-    }
-
-    if (trimmed.startsWith(QStringLiteral("OK"))) {
-        emit sig_patient_operation_success(trimmed.mid(2).trimmed());
-        return;
-    }
-
-    if (trimmed.startsWith(QStringLiteral("ERR"))) {
-        const QString error_text = trimmed.mid(3).trimmed();
-        gp::logging::Logger::Instance().WarningText(
-            QString("业务服务端返回错误: %1").arg(error_text).toUtf8().toStdString());
-
-        if (login_pending_) {
-            login_pending_ = false;
-            pending_password_.clear();
-            emit sig_login_failed(error_text);
-            socket_.disconnectFromHost();
-            return;
-        }
-
-        emit sig_business_error(error_text);
     }
 }
 
-void BusinessClient::SendLine(const QString& line) {
-    socket_.write(line.toUtf8());
-    socket_.write("\n");
+void BusinessClient::SendPacket(gp::protocol::MessageType type, const QJsonObject& payload) {
+    const QByteArray bytes = gp::qt_protocol::EncodeJsonPacket(type, payload);
+    socket_.write(bytes);
 }
 
 void BusinessClient::EmitLog(const QString& text) {
@@ -517,89 +584,85 @@ bool BusinessClient::EnsureConnected() {
     return false;
 }
 
-bool BusinessClient::ParsePatientText(const QString& text, PatientInfo* patient_info) {
+QString BusinessClient::JsonValueToText(const QJsonValue& value) {
+    if (value.isString()) {
+        return value.toString();
+    }
+    if (value.isDouble()) {
+        return FormatNumber(value.toDouble());
+    }
+    if (value.isBool()) {
+        return value.toBool() ? QStringLiteral("true") : QStringLiteral("false");
+    }
+    if (value.isNull() || value.isUndefined()) {
+        return QString();
+    }
+    if (value.isObject()) {
+        return QString::fromUtf8(QJsonDocument(value.toObject()).toJson(QJsonDocument::Compact));
+    }
+    if (value.isArray()) {
+        return QString::fromUtf8(QJsonDocument(value.toArray()).toJson(QJsonDocument::Compact));
+    }
+    return QString();
+}
+
+bool BusinessClient::ParsePatientObject(const QJsonObject& object, PatientInfo* patient_info) {
     if (patient_info == nullptr) {
         return false;
     }
 
-    const QStringList fields = text.split('|', Qt::KeepEmptyParts);
-    if (fields.size() < 6) {
-        return false;
-    }
-
     bool age_ok = false;
-    const int age = fields[3].trimmed().toInt(&age_ok);
+    const int age = JsonValueToText(object.value(QStringLiteral("age"))).toInt(&age_ok);
     if (!age_ok) {
         return false;
     }
 
-    patient_info->patient_id = fields[0].trimmed();
-    patient_info->name = fields[1].trimmed();
-    patient_info->gender = fields[2].trimmed();
+    patient_info->patient_id = JsonValueToText(object.value(QStringLiteral("patient_id"))).trimmed();
+    patient_info->name = JsonValueToText(object.value(QStringLiteral("name"))).trimmed();
+    patient_info->gender = JsonValueToText(object.value(QStringLiteral("gender"))).trimmed();
     patient_info->age = age;
-    patient_info->phone = fields[4].trimmed();
-    patient_info->remark = fields.mid(5).join("|").trimmed();
+    patient_info->phone = JsonValueToText(object.value(QStringLiteral("phone"))).trimmed();
+    patient_info->remark = JsonValueToText(object.value(QStringLiteral("remark"))).trimmed();
     return !patient_info->patient_id.isEmpty();
 }
 
-bool BusinessClient::ParseMonitorRecordText(const QString& text, MonitorRecordInfo* record_info) {
+bool BusinessClient::ParseMonitorRecordObject(const QJsonObject& object, MonitorRecordInfo* record_info) {
     if (record_info == nullptr) {
         return false;
     }
 
-    const QStringList fields = text.split('|', Qt::KeepEmptyParts);
-    if (fields.size() < 10) {
-        return false;
-    }
-
-    record_info->record_id = fields[0].trimmed();
-    record_info->patient_id = fields[1].trimmed();
-    record_info->recorded_at = fields[2].trimmed();
-    record_info->pred_label = fields[3].trimmed();
-    record_info->confidence = fields[4].trimmed();
-    record_info->alert_level = fields[5].trimmed();
-    record_info->latency_ms = fields[6].trimmed();
-    record_info->source = fields[7].trimmed();
-    record_info->sample_name = fields[8].trimmed();
-    record_info->true_label = fields.mid(9).join("|").trimmed();
+    record_info->record_id = JsonValueToText(object.value(QStringLiteral("record_id"))).trimmed();
+    record_info->patient_id = JsonValueToText(object.value(QStringLiteral("patient_id"))).trimmed();
+    record_info->recorded_at = JsonValueToText(object.value(QStringLiteral("recorded_at"))).trimmed();
+    record_info->pred_label = JsonValueToText(object.value(QStringLiteral("pred_label"))).trimmed();
+    record_info->confidence = JsonValueToText(object.value(QStringLiteral("confidence"))).trimmed();
+    record_info->alert_level = JsonValueToText(object.value(QStringLiteral("alert_level"))).trimmed();
+    record_info->latency_ms = JsonValueToText(object.value(QStringLiteral("latency_ms"))).trimmed();
+    record_info->source = JsonValueToText(object.value(QStringLiteral("source"))).trimmed();
+    record_info->sample_name = JsonValueToText(object.value(QStringLiteral("sample_name"))).trimmed();
+    record_info->true_label = JsonValueToText(object.value(QStringLiteral("true_label"))).trimmed();
     return !record_info->record_id.isEmpty();
 }
 
-bool BusinessClient::ParseAlertText(const QString& text, AlertInfo* alert_info) {
+bool BusinessClient::ParseAlertObject(const QJsonObject& object, AlertInfo* alert_info) {
     if (alert_info == nullptr) {
         return false;
     }
 
-    const QStringList fields = text.split('|', Qt::KeepEmptyParts);
-    if (fields.size() < 9) {
-        return false;
-    }
-
-    alert_info->alert_id = fields[0].trimmed();
-    alert_info->patient_id = fields[1].trimmed();
-    alert_info->created_at = fields[2].trimmed();
-    alert_info->alert_level = fields[3].trimmed();
-    alert_info->pred_label = fields[4].trimmed();
-    alert_info->confidence = fields[5].trimmed();
-    alert_info->source = fields[6].trimmed();
-    alert_info->sample_name = fields[7].trimmed();
-    alert_info->status = fields[8].trimmed();
+    alert_info->alert_id = JsonValueToText(object.value(QStringLiteral("alert_id"))).trimmed();
+    alert_info->patient_id = JsonValueToText(object.value(QStringLiteral("patient_id"))).trimmed();
+    alert_info->created_at = JsonValueToText(object.value(QStringLiteral("created_at"))).trimmed();
+    alert_info->alert_level = JsonValueToText(object.value(QStringLiteral("alert_level"))).trimmed();
+    alert_info->pred_label = JsonValueToText(object.value(QStringLiteral("pred_label"))).trimmed();
+    alert_info->confidence = JsonValueToText(object.value(QStringLiteral("confidence"))).trimmed();
+    alert_info->source = JsonValueToText(object.value(QStringLiteral("source"))).trimmed();
+    alert_info->sample_name = JsonValueToText(object.value(QStringLiteral("sample_name"))).trimmed();
+    alert_info->status = JsonValueToText(object.value(QStringLiteral("status"))).trimmed();
     if (alert_info->status == QStringLiteral("new")) {
         alert_info->status = QStringLiteral("pending");
     }
-    if (fields.size() >= 11) {
-        alert_info->confirmed_at = fields[9].trimmed();
-        alert_info->confirmed_by = fields[10].trimmed();
-    }
+    alert_info->confirmed_at = JsonValueToText(object.value(QStringLiteral("confirmed_at"))).trimmed();
+    alert_info->confirmed_by = JsonValueToText(object.value(QStringLiteral("confirmed_by"))).trimmed();
     return !alert_info->alert_id.isEmpty();
-}
-
-QString BusinessClient::EscapeField(const QString& text) {
-    QString sanitized = text;
-    sanitized.replace('|', '/');
-    sanitized.replace(';', ' ');
-    sanitized.replace('\r', ' ');
-    sanitized.replace('\n', ' ');
-    return sanitized.trimmed();
 }
 

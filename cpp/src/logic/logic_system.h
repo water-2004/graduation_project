@@ -12,7 +12,7 @@
 
 namespace edge::logic {
 
-// 路由/分发层：负责命令注册与分发，不直接处理网络读写。
+// 路由/分发层：对外提供 JSON 协议包处理，对内保留命令式逻辑核心。
 class LogicSystem : public edge::net::LogicHandler {
 public:
     using CommandHandler = std::function<std::string(const std::string&, bool* close_conn)>;
@@ -21,7 +21,8 @@ public:
         std::shared_ptr<service::InferenceEngine> engine,
         std::shared_ptr<service::SampleRepository> sample_repository = nullptr);
 
-    std::string HandleLine(const std::string& line, bool* close_conn) const override;
+    gp::protocol::Packet HandlePacket(const gp::protocol::Packet& request, bool* close_conn) const override;
+    std::string HandleLine(const std::string& line, bool* close_conn) const;
 
 private:
     static std::string ToUpper(std::string text);
